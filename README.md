@@ -1,1 +1,0 @@
-# freewise-django
