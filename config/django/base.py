@@ -48,7 +48,20 @@ INSTALLED_APPS = [
 
     'pages',
 
-    'users', 'accounts', 'profiles',
+    'users', 'accounts',
+
+    'freelancers', 'clients',
+
+    'jobs', 'offers', 'contracts',
+
+    'collabs',
+
+    'payments',
+
+    'notifications',
+
+    'reviews',
+
 ]
 
 MIDDLEWARE = [

@@ -18,7 +18,6 @@ from .constants import USERNAME_MAX_LENGTH
 class User(AbstractUser, LowercaseFieldsMixin):
     username = models.CharField(max_length=USERNAME_MAX_LENGTH, unique=True, validators=[username_regex, username_profanity, username_reserved_terms], db_index=True)
     is_staff = models.BooleanField(default=False)
-    is_merchant = models.BooleanField(default=False)
 
     class ProcessOptions:
         lowercase_fields = ['username']
