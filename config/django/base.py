@@ -54,9 +54,16 @@ INSTALLED_APPS = [
     'jobs', 'offers', 'collabs',
     'notifications',
     'payments', 'contracts', 'reviews',
+
+    'rest_framework',
+    'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
+    'corsheaders',
 ]
 
 MIDDLEWARE = [
+
+    'corsheaders.middleware.CorsMiddleware',
 
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -222,3 +229,32 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 PHONENUMBER_DEFAULT_REGION = "DZ"   # local validation / examples for Algeria
 PHONENUMBER_DB_FORMAT = "E164" # !!! DO DONT CHANGE THIS: visit docs for more details. store phone numbers in E.164 in DB (stable, recommended)
 PHONENUMBER_DEFAULT_FORMAT = "NATIONAL"  # how phone numbers are formatted by default for display
+
+# REST Framework
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ),
+    'DEFAULT_PERMISSION_CLASSES': (
+        'rest_framework.permissions.IsAuthenticated',
+    ),
+    'DEFAULT_RENDERER_CLASSES': (
+        'rest_framework.renderers.JSONRenderer',
+    ),
+}
+
+# SimpleJWT
+from datetime import timedelta
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME':    timedelta(minutes=30),
+    'REFRESH_TOKEN_LIFETIME':   timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS':    True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'AUTH_HEADER_TYPES':        ('Bearer',),
+}
+
+# CORS
+CORS_ALLOWED_ORIGINS = [
+    'http://localhost:3000',
+]
+CORS_ALLOW_CREDENTIALS = True
