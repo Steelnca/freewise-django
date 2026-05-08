@@ -10,7 +10,7 @@ SESSION_COOKIE_SECURE = True                  # True on HTTPS only (must enable 
 CSRF_COOKIE_SECURE = True
 
 # Optional: set a dedicated subdomain for cookies if you use subdomains (leave None otherwise)
-SESSION_COOKIE_DOMAIN = ".paintlor.com"
+SESSION_COOKIE_DOMAIN = ".freewise.com"
 
 
 R2_ACCESS_KEY_ID = env('R2_ACCESS_KEY_ID')
