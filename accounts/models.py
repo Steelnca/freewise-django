@@ -47,6 +47,8 @@ class Account(models.Model):
     is_client = models.BooleanField(default=False)
     is_freelancer = models.BooleanField(default=False)
 
+    slug = models.SlugField(max_length=100, unique=True)
+
     def __str__(self):
         return f'{self.user.username}\'s account'
 

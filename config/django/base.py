@@ -34,11 +34,6 @@ USER_AGENT = env('USER_AGENT')
 
 INSTALLED_APPS = [
 
-    'allauth',
-    'allauth.account',
-    'allauth.socialaccount',
-    'allauth.socialaccount.providers.google',
-
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -46,22 +41,19 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
 
+    # Third party
+    'allauth',
+    'allauth.account',
+    'allauth.socialaccount',
+    'allauth.socialaccount.providers.google',
+    'phonenumber_field',
+
+    # Freewise apps
     'pages',
-
-    'users', 'accounts',
-
-    'freelancers', 'clients',
-
-    'jobs', 'offers', 'contracts',
-
-    'collabs',
-
-    'payments',
-
+    'users', 'accounts', 'freelancers', 'clients',
+    'jobs', 'offers', 'collabs',
     'notifications',
-
-    'reviews',
-
+    'payments', 'contracts', 'reviews',
 ]
 
 MIDDLEWARE = [
