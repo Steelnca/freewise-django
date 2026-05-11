@@ -11,15 +11,20 @@ class Contract(models.Model):
         CANCELLED = 'CANCELLED', _('Cancelled')
 
     # --- Relations ---
+    # Null when contract comes from a service order instead of a job proposal
     job = models.OneToOneField(
         'jobs.Job',
         on_delete=models.PROTECT,
         related_name='contract',
+        null=True,
+        blank=True,
     )
     proposal = models.OneToOneField(
         'proposals.Proposal',
         on_delete=models.PROTECT,
         related_name='contract',
+        null=True,
+        blank=True,
     )
     client = models.ForeignKey(
         'clients.ClientProfile',
