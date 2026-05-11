@@ -2,7 +2,7 @@ from django.db import models
 from django.utils.translation import gettext_lazy as _
 
 
-class Offer(models.Model):
+class Proposal(models.Model):
 
     class Status(models.TextChoices):
         PENDING   = 'PENDING',   _('Pending')
@@ -14,12 +14,12 @@ class Offer(models.Model):
     job = models.ForeignKey(
         'jobs.Job',
         on_delete=models.CASCADE,
-        related_name='offers',
+        related_name='proposals',
     )
     freelancer = models.ForeignKey(
         'freelancers.FreelancerProfile',
         on_delete=models.CASCADE,
-        related_name='offers',
+        related_name='proposals',
     )
 
     # --- Proposal details ---
@@ -41,7 +41,7 @@ class Offer(models.Model):
 
     class Meta:
         ordering = ['-created_at']
-        # One offer per freelancer per job
+        # One proposal per freelancer per job
         unique_together = ('job', 'freelancer')
 
     def __str__(self):

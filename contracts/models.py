@@ -16,8 +16,8 @@ class Contract(models.Model):
         on_delete=models.PROTECT,
         related_name='contract',
     )
-    offer = models.OneToOneField(
-        'offers.Offer',
+    proposal = models.OneToOneField(
+        'proposals.Proposal',
         on_delete=models.PROTECT,
         related_name='contract',
     )

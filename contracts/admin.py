@@ -22,7 +22,7 @@ class ContractAdmin(admin.ModelAdmin):
             'fields': ('client', 'freelancer'),
         }),
         ('Source', {
-            'fields': ('job', 'offer'),
+            'fields': ('job', 'proposal'),
         }),
         ('Terms', {
             'fields': ('agreed_price', 'deadline'),

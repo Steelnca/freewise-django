@@ -6,9 +6,9 @@ class Notification(models.Model):
 
     class Type(models.TextChoices):
         # Job flow
-        JOB_NEW_OFFER       = 'JOB_NEW_OFFER',       _('New offer on your job')
-        OFFER_ACCEPTED      = 'OFFER_ACCEPTED',       _('Your offer was accepted')
-        OFFER_REJECTED      = 'OFFER_REJECTED',       _('Your offer was rejected')
+        JOB_NEW_PROPOSAL      = 'JOB_NEW_PROPOSAL',       _('New proposal on your job')
+        PROPOSAL_ACCEPTED      = 'PROPOSAL_ACCEPTED',       _('Your proposal was accepted')
+        PROPOSAL_REJECTED      = 'PROPOSAL_REJECTED',       _('Your proposal was rejected')
         # Contract & payment
         CONTRACT_STARTED    = 'CONTRACT_STARTED',     _('Contract started')
         PAYMENT_HELD        = 'PAYMENT_HELD',         _('Payment is in escrow')

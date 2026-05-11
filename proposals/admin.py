@@ -1,10 +1,10 @@
 from django.contrib import admin
 
-from .models import Offer
+from .models import Proposal
 
 
-@admin.register(Offer)
-class OfferAdmin(admin.ModelAdmin):
+@admin.register(Proposal)
+class ProposalAdmin(admin.ModelAdmin):
     list_display    = ('freelancer', 'job', 'proposed_price', 'delivery_days', 'status', 'created_at')
     list_filter     = ('status',)
     search_fields   = ('freelancer__account__user__username', 'job__title')

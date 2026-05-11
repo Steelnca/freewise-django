@@ -29,7 +29,7 @@ class JobListView(generics.ListAPIView):
     def get_queryset(self):
         qs = Job.objects.filter(status=Job.Status.OPEN).select_related(
             'client__account__user', 'category'
-        ).prefetch_related('tags', 'offers')
+        ).prefetch_related('tags', 'proposals')
 
         category = self.request.query_params.get('category')
         if category:
@@ -67,7 +67,7 @@ class JobDetailView(generics.RetrieveAPIView):
     serializer_class   = JobSerializer
     queryset           = Job.objects.select_related(
         'client__account__user', 'category'
-    ).prefetch_related('tags', 'offers')
+    ).prefetch_related('tags', 'proposals')
 
 
 class JobUpdateView(generics.UpdateAPIView):
@@ -99,7 +99,7 @@ class MyJobsView(generics.ListAPIView):
             return Job.objects.none()
         return Job.objects.filter(client=client).select_related(
             'client__account__user', 'category'
-        ).prefetch_related('tags', 'offers')
+        ).prefetch_related('tags', 'proposals')
 
 
 class CategoryListView(generics.ListAPIView):

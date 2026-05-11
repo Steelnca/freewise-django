@@ -51,7 +51,7 @@ INSTALLED_APPS = [
     # Freewise apps
     'pages',
     'users', 'accounts', 'freelancers', 'clients',
-    'jobs', 'offers', 'collabs',
+    'jobs', 'proposals', 'collabs',
     'notifications',
     'payments', 'contracts', 'reviews',
 

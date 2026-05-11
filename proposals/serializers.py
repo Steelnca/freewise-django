@@ -1,16 +1,16 @@
 
 from rest_framework import serializers
-from .models import Offer
+from .models import Proposal
 
 
-class OfferSerializer(serializers.ModelSerializer):
+class ProposalSerializer(serializers.ModelSerializer):
     freelancer_username = serializers.CharField(source='freelancer.account.user.username', read_only=True)
     freelancer_slug     = serializers.CharField(source='freelancer.account.slug',          read_only=True)
     freelancer_rating   = serializers.DecimalField(source='freelancer.rating', max_digits=3, decimal_places=2, read_only=True)
     job_title           = serializers.CharField(source='job.title', read_only=True)
 
     class Meta:
-        model  = Offer
+        model  = Proposal
         fields = (
             'id',
             'job', 'job_title',
@@ -21,7 +21,7 @@ class OfferSerializer(serializers.ModelSerializer):
         read_only_fields = ('status', 'created_at')
 
 
-class OfferCreateSerializer(serializers.ModelSerializer):
+class ProposalCreateSerializer(serializers.ModelSerializer):
     class Meta:
-        model  = Offer
+        model  = Proposal
         fields = ('cover_letter', 'proposed_price', 'delivery_days')

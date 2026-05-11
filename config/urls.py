@@ -14,7 +14,7 @@ urlpatterns = [
     path('api/freelancers/',   include('freelancers.urls')),
     path('api/clients/',       include('clients.urls')),
     path('api/jobs/',          include('jobs.urls')),
-    path('api/offers/',        include('offers.urls')),
+    path('api/proposals/',     include('proposals.urls')),
     path('api/contracts/',     include('contracts.urls')),
     path('api/payments/',      include('payments.urls')),
     path('api/collabs/',       include('collabs.urls')),

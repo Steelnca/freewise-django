@@ -26,7 +26,7 @@ class JobSerializer(serializers.ModelSerializer):
     tag_ids         = serializers.PrimaryKeyRelatedField(
         queryset=Tag.objects.all(), source='tags', write_only=True, many=True, required=False
     )
-    offer_count     = serializers.IntegerField(source='offers.count', read_only=True)
+    proposal_count     = serializers.IntegerField(source='proposals.count', read_only=True)
 
     class Meta:
         model  = Job
@@ -37,10 +37,10 @@ class JobSerializer(serializers.ModelSerializer):
             'tags', 'tag_ids',
             'experience_level',
             'budget_min', 'budget_max', 'deadline',
-            'status', 'offer_count',
+            'status', 'proposal_count',
             'created_at',
         )
-        read_only_fields = ('status', 'created_at', 'offer_count')
+        read_only_fields = ('status', 'created_at', 'proposal_count')
 
 
 class JobCreateSerializer(serializers.ModelSerializer):

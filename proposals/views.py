@@ -7,13 +7,13 @@ from rest_framework.permissions import IsAuthenticated
 
 from jobs.models import Job
 from contracts.models import Contract, Milestone
-from .models import Offer
-from .serializers import OfferSerializer, OfferCreateSerializer
+from .models import Proposal
+from .serializers import ProposalSerializer, ProposalCreateSerializer
 
 
-class SubmitOfferView(APIView):
+class SubmitProposalView(APIView):
     """
-    POST /api/offers/<job_id>/  → freelancer submits an offer on a job
+    POST /api/proposals/<job_id>/  → freelancer submits an proposal on a job
     """
     permission_classes = [IsAuthenticated]
 
@@ -35,126 +35,126 @@ class SubmitOfferView(APIView):
         if job.client.account == account:
             return Response({'detail': 'You cannot bid on your own job.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if Offer.objects.filter(job=job, freelancer=freelancer).exists():
-            return Response({'detail': 'You have already submitted an offer for this job.'}, status=status.HTTP_400_BAD_REQUEST)
+        if Proposal.objects.filter(job=job, freelancer=freelancer).exists():
+            return Response({'detail': 'You have already submitted an proposal for this job.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        serializer = OfferCreateSerializer(data=request.data)
+        serializer = ProposalCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        offer = serializer.save(job=job, freelancer=freelancer)
-        return Response(OfferSerializer(offer).data, status=status.HTTP_201_CREATED)
+        proposal = serializer.save(job=job, freelancer=freelancer)
+        return Response(ProposalSerializer(proposal).data, status=status.HTTP_201_CREATED)
 
 
-class MyOffersView(generics.ListAPIView):
+class MyProposalsView(generics.ListAPIView):
     """
-    GET /api/offers/mine/  → freelancer's submitted offers
+    GET /api/proposals/mine/  → freelancer's submitted proposals
     """
     permission_classes = [IsAuthenticated]
-    serializer_class   = OfferSerializer
+    serializer_class   = ProposalSerializer
 
     def get_queryset(self):
         account    = getattr(self.request.user, 'account', None)
         freelancer = getattr(account, 'freelancer_profile', None)
         if not freelancer:
-            return Offer.objects.none()
-        return Offer.objects.filter(freelancer=freelancer).select_related(
+            return Proposal.objects.none()
+        return Proposal.objects.filter(freelancer=freelancer).select_related(
             'job', 'freelancer__account__user'
         )
 
 
-class JobOffersView(generics.ListAPIView):
+class JobProposalsView(generics.ListAPIView):
     """
-    GET /api/offers/job/<job_id>/  → all offers on a job (client only, owner)
+    GET /api/proposals/job/<job_id>/  → all proposals on a job (client only, owner)
     """
     permission_classes = [IsAuthenticated]
-    serializer_class   = OfferSerializer
+    serializer_class   = ProposalSerializer
 
     def get_queryset(self):
         account = getattr(self.request.user, 'account', None)
         client  = getattr(account, 'client_profile', None)
         if not client:
-            return Offer.objects.none()
-        return Offer.objects.filter(
+            return Proposal.objects.none()
+        return Proposal.objects.filter(
             job__id=self.kwargs['job_id'],
             job__client=client,
         ).select_related('freelancer__account__user', 'job')
 
 
-class AcceptOfferView(APIView):
+class AcceptProposalView(APIView):
     """
-    POST /api/offers/<offer_id>/accept/
-    Client accepts an offer → creates Contract + Milestone.
+    POST /api/proposals/<proposal_id>/accept/
+    Client accepts an proposal → creates Contract + Milestone.
     """
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, offer_id):
+    def post(self, request, proposal_id):
         account = getattr(request.user, 'account', None)
         client  = getattr(account, 'client_profile', None)
         if not client:
             return Response({'detail': 'Client profile required.'}, status=status.HTTP_403_FORBIDDEN)
 
         try:
-            offer = Offer.objects.select_related('job', 'freelancer').get(
-                pk=offer_id,
+            proposal = Proposal.objects.select_related('job', 'freelancer').get(
+                pk=proposal_id,
                 job__client=client,
-                status=Offer.Status.PENDING,
+                status=Proposal.Status.PENDING,
             )
-        except Offer.DoesNotExist:
-            return Response({'detail': 'Offer not found.'}, status=status.HTTP_404_NOT_FOUND)
+        except Proposal.DoesNotExist:
+            return Response({'detail': 'Proposal not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        if hasattr(offer.job, 'contract'):
+        if hasattr(proposal.job, 'contract'):
             return Response({'detail': 'This job already has a contract.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Accept this offer, reject all others on the same job
-        offer.status = Offer.Status.ACCEPTED
-        offer.save(update_fields=['status'])
-        Offer.objects.filter(job=offer.job).exclude(pk=offer.pk).update(status=Offer.Status.REJECTED)
+        # Accept this proposal, reject all others on the same job
+        proposal.status = Proposal.Status.ACCEPTED
+        proposal.save(update_fields=['status'])
+        Proposal.objects.filter(job=proposal.job).exclude(pk=proposal.pk).update(status=Proposal.Status.REJECTED)
 
         # Mark job as in progress
-        offer.job.status = Job.Status.IN_PROGRESS
-        offer.job.save(update_fields=['status'])
+        proposal.job.status = Job.Status.IN_PROGRESS
+        proposal.job.save(update_fields=['status'])
 
         # Create contract
         contract = Contract.objects.create(
-            job=offer.job,
-            offer=offer,
+            job=proposal.job,
+            proposal=proposal,
             client=client,
-            freelancer=offer.freelancer,
-            agreed_price=offer.proposed_price,
-            deadline=offer.job.deadline or timezone.now().date(),
+            freelancer=proposal.freelancer,
+            agreed_price=proposal.proposed_price,
+            deadline=proposal.job.deadline or timezone.now().date(),
         )
 
         # Create single milestone (full amount)
         Milestone.objects.create(
             contract=contract,
             title='Full project delivery',
-            amount=offer.proposed_price,
+            amount=proposal.proposed_price,
             due_date=contract.deadline,
             order=1,
         )
 
         return Response({
-            'detail': 'Offer accepted. Contract created.',
+            'detail': 'Proposal accepted. Contract created.',
             'contract_id': contract.pk,
         }, status=status.HTTP_201_CREATED)
 
 
-class WithdrawOfferView(APIView):
+class WithdrawProposalView(APIView):
     """
-    POST /api/offers/<offer_id>/withdraw/  → freelancer withdraws their offer
+    POST /api/proposals/<proposal_id>/withdraw/  → freelancer withdraws their proposal
     """
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, offer_id):
+    def post(self, request, proposal_id):
         account    = getattr(request.user, 'account', None)
         freelancer = getattr(account, 'freelancer_profile', None)
         if not freelancer:
             return Response({'detail': 'Freelancer profile required.'}, status=status.HTTP_403_FORBIDDEN)
 
         try:
-            offer = Offer.objects.get(pk=offer_id, freelancer=freelancer, status=Offer.Status.PENDING)
-        except Offer.DoesNotExist:
-            return Response({'detail': 'Offer not found or cannot be withdrawn.'}, status=status.HTTP_404_NOT_FOUND)
+            proposal = Proposal.objects.get(pk=proposal_id, freelancer=freelancer, status=Proposal.Status.PENDING)
+        except Proposal.DoesNotExist:
+            return Response({'detail': 'Proposal not found or cannot be withdrawn.'}, status=status.HTTP_404_NOT_FOUND)
 
-        offer.status = Offer.Status.WITHDRAWN
-        offer.save(update_fields=['status'])
-        return Response({'detail': 'Offer withdrawn.'})
+        proposal.status = Proposal.Status.WITHDRAWN
+        proposal.save(update_fields=['status'])
+        return Response({'detail': 'Proposal withdrawn.'})
