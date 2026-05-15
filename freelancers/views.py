@@ -1,4 +1,4 @@
-from rest_framework import status, generics
+from rest_framework import status, generics, filters
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -52,3 +52,25 @@ class SkillListView(generics.ListAPIView):
     permission_classes = [AllowAny]
     serializer_class   = SkillSerializer
     queryset           = Skill.objects.all().order_by('name')
+
+class FreelancerListView(generics.ListAPIView):
+    """
+    GET /api/freelancers/ — browse all freelancers (public)
+    """
+    permission_classes = [AllowAny]
+    serializer_class   = FreelancerProfileSerializer
+    filter_backends    = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields      = ['title', 'bio', 'account__user__username', 'skills__skill__name']
+    ordering_fields    = ['rating', 'completed_jobs', 'created_at']
+    ordering           = ['-rating']
+
+    def get_queryset(self):
+        qs = FreelancerProfile.objects.select_related(
+            'account__user'
+        ).prefetch_related('skills__skill')
+
+        availability = self.request.query_params.get('availability')
+        if availability:
+            qs = qs.filter(availability=availability.upper())
+
+        return qs

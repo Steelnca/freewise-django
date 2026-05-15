@@ -24,7 +24,7 @@ def on_proposal_saved(sender, instance, created, **kwargs):
         client_account = instance.job.client.account
         notify(
             account=client_account,
-            type_=Notification.Type.JOB_NEW_OFFER,
+            type_=Notification.Type.JOB_NEW_PROPOSAL,
             title='New proposal on your job',
             message=f'{instance.freelancer.account.user.username} submitted a proposal on "{instance.job.title}".',
             link=f'/dashboard/jobs',
@@ -34,7 +34,7 @@ def on_proposal_saved(sender, instance, created, **kwargs):
         if instance.status == 'ACCEPTED':
             notify(
                 account=instance.freelancer.account,
-                type_=Notification.Type.OFFER_ACCEPTED,
+                type_=Notification.Type.PROPOSAL_ACCEPTED,
                 title='Your proposal was accepted!',
                 message=f'Your proposal on "{instance.job.title}" was accepted. A contract has been created.',
                 link=f'/dashboard/contracts',
@@ -42,7 +42,7 @@ def on_proposal_saved(sender, instance, created, **kwargs):
         elif instance.status == 'REJECTED':
             notify(
                 account=instance.freelancer.account,
-                type_=Notification.Type.OFFER_REJECTED,
+                type_=Notification.Type.PROPOSAL_REJECTED,
                 title='Proposal not selected',
                 message=f'Your proposal on "{instance.job.title}" was not selected this time.',
                 link=f'/dashboard/proposals',
