@@ -36,6 +36,10 @@ class Account(models.Model):
     is_client     = models.BooleanField(default=False)
     is_freelancer = models.BooleanField(default=False)
 
+    # Verification
+    email_verified = models.BooleanField(default=False)
+    phone_verified = models.BooleanField(default=False)
+
     # Timestamps
     joined_at  = models.DateField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

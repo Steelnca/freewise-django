@@ -38,3 +38,22 @@ class UsernameChangeLog(models.Model):
 
     def __str__(self):
         return f"{self.user.username} changed from {self.old_username} on {self.changed_at.date()}"
+
+
+class PhoneOTP(models.Model):
+    """6-digit OTP for phone number verification."""
+    account    = models.ForeignKey('accounts.Account', on_delete=models.CASCADE, related_name='phone_otps')
+    code       = models.CharField(max_length=6)
+    used       = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    OTP_EXPIRY_MINUTES = 10
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def is_expired(self):
+        return timezone.now() > self.created_at + timezone.timedelta(minutes=self.OTP_EXPIRY_MINUTES)
+
+    def __str__(self):
+        return f"OTP for {self.account} ({'used' if self.used else 'active'})"

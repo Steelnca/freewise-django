@@ -161,7 +161,7 @@ class PlaceOrderView(APIView):
         # Auto-create a Contract + Milestone so escrow system works identically
         contract = Contract.objects.create(
             job=None,
-            offer=None,
+            proposal=None,
             client=client,
             freelancer=service.freelancer,
             agreed_price=package.price,
