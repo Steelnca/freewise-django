@@ -66,3 +66,5 @@ STORAGES = {
 STATIC_URL = f"https://{R2_CUSTOM_DOMAIN}/{STATIC_LOCATION}/"
 
 MEDIA_URL = f"https://{R2_CUSTOM_DOMAIN}/{MEDIA_LOCATION}/"
+
+FRONTEND_URL="http://freewise." # !!! Set this to your actual frontend URL in production (e.g., https://freewise.com)
