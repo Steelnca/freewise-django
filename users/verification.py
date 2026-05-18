@@ -1,4 +1,3 @@
-
 """
 Verification utilities for email and phone OTP.
 """

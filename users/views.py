@@ -22,33 +22,37 @@ User = get_user_model()
 class RegisterView(APIView):
     """
     POST /api/auth/register/
-    Creates user + account, sends verification email.
-    Returns JWT tokens — user can use the app but email_verified=False
-    until they click the link.
+    Creates user (inactive until email verified), sends verification email.
+    Does NOT return JWT tokens — user must verify email then login.
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user = serializer.save()
 
-        # Send verification email (non-blocking — failure doesn't break signup)
+        # Create user as inactive until email is verified
+        user = serializer.save()
+        user.is_active = False
+        user.save(update_fields=['is_active'])
+
+        # Send verification email
         try:
             send_verification_email(user)
-        except Exception:
-            pass  # Log in production, don't break signup
+        except Exception as e:
+            # If email fails, activate anyway and log — don't block signup
+            import logging
+            logging.getLogger(__name__).error(f'Failed to send verification email to {user.email}: {e}')
+            user.is_active = True
+            user.save(update_fields=['is_active'])
+            account = getattr(user, 'account', None)
+            if account:
+                account.email_verified = True
+                account.save(update_fields=['email_verified'])
 
-        refresh = RefreshToken.for_user(user)
         return Response({
-            'access':         str(refresh.access_token),
-            'refresh':        str(refresh),
-            'email_verified': False,
-            'user': {
-                'id':       user.id,
-                'username': user.username,
-                'email':    user.email,
-            },
+            'detail': 'Account created. Please check your email to verify your account before logging in.',
+            'email':  user.email,
         }, status=status.HTTP_201_CREATED)
 
 
