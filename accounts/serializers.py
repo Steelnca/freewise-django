@@ -1,5 +1,4 @@
 from rest_framework import serializers
-
 from .models import Account
 
 
@@ -10,22 +9,17 @@ class AccountSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Account
         fields = (
-            'id',
-            'username',
-            'email',
-            'avatar',
-            'bio',
-            'slug',
-            'country',
-            'birthday',
-            'phone',
-            'locale',
-            'theme',
-            'is_client',
-            'is_freelancer',
+            'id', 'username', 'email',
+            'avatar', 'bio', 'slug', 'country', 'birthday',
+            'phone', 'locale', 'theme',
+            'is_client', 'is_freelancer',
+            'email_verified', 'phone_verified',
             'joined_at',
         )
-        read_only_fields = ('slug', 'is_client', 'is_freelancer', 'joined_at')
+        read_only_fields = (
+            'slug', 'is_client', 'is_freelancer',
+            'email_verified', 'phone_verified', 'joined_at',
+        )
 
 
 class AccountUpdateSerializer(serializers.ModelSerializer):
