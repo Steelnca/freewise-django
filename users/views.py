@@ -93,18 +93,38 @@ class MeView(APIView):
 # ─── Email verification ───────────────────────────────────────────────────────
 
 class ResendVerificationEmailView(APIView):
-    """POST /api/auth/resend-verification/ — resend email verification link."""
-    permission_classes = [IsAuthenticated]
+    """
+    POST /api/auth/resend-verification/
+    - Authenticated: resends to logged-in user's email
+    - Unauthenticated: accepts { email } in body and resends to that address
+    """
+    permission_classes = [AllowAny]
 
     def post(self, request):
-        account = getattr(request.user, 'account', None)
+        # Authenticated path
+        if request.user and request.user.is_authenticated:
+            user = request.user
+        else:
+            # Unauthenticated path — find user by email
+            email = request.data.get('email', '').strip().lower()
+            if not email:
+                return Response({'detail': 'Email is required.'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                user = User.objects.get(email__iexact=email, is_active=False)
+            except User.DoesNotExist:
+                # Don't reveal whether email exists — always return success
+                return Response({'detail': 'If that email exists and is unverified, we sent a new link.'})
+
+        account = getattr(user, 'account', None)
         if account and account.email_verified:
-            return Response({'detail': 'Email already verified.'})
+            return Response({'detail': 'Email is already verified.'})
+
         try:
-            send_verification_email(request.user)
+            send_verification_email(user)
         except Exception as e:
             return Response({'detail': f'Failed to send email: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response({'detail': 'Verification email sent.'})
+
+        return Response({'detail': 'Verification email sent. Please check your inbox.'})
 
 
 class VerifyEmailView(APIView):
