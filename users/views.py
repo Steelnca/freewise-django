@@ -19,6 +19,10 @@ from .verification import (
     verify_phone_otp,
 )
 
+from urllib.parse import unquote
+from django.utils.translation import gettext as _
+
+
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
@@ -93,7 +97,7 @@ class RegisterView(APIView):
 
         return Response(
             {
-                "detail": (
+                "detail": _(
                     "Account created. Check your email to verify it before logging in."
                 ),
                 "email": user.email,
@@ -137,7 +141,7 @@ class LogoutView(APIView):
         refresh_token = request.data.get("refresh")
         if not refresh_token:
             return Response(
-                {"detail": "Refresh token is required."},
+                {"detail": _("Refresh token is required.")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -145,7 +149,7 @@ class LogoutView(APIView):
             RefreshToken(refresh_token).blacklist()
         except TokenError:
             return Response(
-                {"detail": "Token is invalid or already blacklisted."},
+                {"detail": _("Token is invalid or already blacklisted.")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -163,7 +167,7 @@ class MeView(APIView):
         account = get_user_account(request.user)
         if not account:
             return Response(
-                {"detail": "Account not found."},
+                {"detail": _("Account not found.")},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
@@ -176,11 +180,11 @@ class VerifyEmailView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        key = request.data.get("key")
+        key = (unquote(request.data.get("key", ""))).strip()
 
         if not key:
             return Response(
-                {"detail": "Verification key is required."},
+                {"detail": _("Verification key is required.")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -188,28 +192,18 @@ class VerifyEmailView(APIView):
 
         if not confirmation:
             return Response(
-                {"detail": "Invalid or expired verification link."},
+                {"detail": _("Invalid or expired verification link.")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         confirmation.confirm(request)
 
         return Response(
-            {"detail": "Email verified successfully."},
+            {"detail": _("Email verified successfully.")},
             status=status.HTTP_200_OK,
         )
 
 class ResendVerificationEmailView(APIView):
-    """
-    POST /api/auth/resend-verification/
-
-    Authenticated:
-        Resends to the logged-in user's email.
-
-    Unauthenticated:
-        Accepts { email } and responds generically.
-        No account existence leakage.
-    """
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -217,42 +211,58 @@ class ResendVerificationEmailView(APIView):
             user = request.user
         else:
             email = (request.data.get("email") or "").strip().lower()
+
             if not email:
                 return Response(
-                    {"detail": "Email is required."},
+                    {"detail": _("Email is required.")},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
             user = User.objects.filter(email__iexact=email).first()
+
             if not user:
                 return Response(
                     {
-                        "detail": (
+                        "detail": _(
                             "If that email exists, a verification link will be sent."
                         )
                     },
                     status=status.HTTP_200_OK,
                 )
 
-        ensure_primary_email_address(user)
+        email_address = EmailAddress.objects.filter(
+            user=user,
+            email__iexact=user.email,
+        ).first()
 
-        if user_has_verified_email(user):
+        if not email_address:
             return Response(
-                {"detail": "Email is already verified."},
+                {"detail": _("Email configuration error.")},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if email_address.verified:
+            return Response(
+                {"detail": _("Email is already verified.")},
                 status=status.HTTP_200_OK,
             )
 
         try:
-            send_email_confirmation(request, user, signup=False)
+            send_email_confirmation(request, user, signup=True)
+
         except Exception:
-            logger.exception("Failed to resend verification email to %s", user.email)
+            logger.exception(
+                "Failed to resend verification email to %s",
+                user.email,
+            )
+
             return Response(
-                {"detail": "Failed to send verification email."},
+                {"detail": _("Failed to send verification email.")},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
         return Response(
-            {"detail": "Verification email sent. Please check your inbox."},
+            {"detail": _("Verification email resent successfully. Please check your inbox.")},
             status=status.HTTP_200_OK,
         )
 

@@ -13,12 +13,12 @@ class AccountSerializer(serializers.ModelSerializer):
             'avatar', 'bio', 'slug', 'country', 'birthday',
             'phone', 'locale', 'theme',
             'is_client', 'is_freelancer',
-            'email_verified', 'phone_verified',
+            'phone_verified',
             'joined_at',
         )
         read_only_fields = (
             'slug', 'is_client', 'is_freelancer',
-            'email_verified', 'phone_verified', 'joined_at',
+            'phone_verified', 'joined_at',
         )
 
 

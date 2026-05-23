@@ -46,9 +46,9 @@ INSTALLED_APPS = [
     # Third party
     'allauth',
     'allauth.account',
+    "allauth.headless",
     'allauth.socialaccount',
     'allauth.socialaccount.providers.google',
-    "allauth.headless",
 
     'phonenumber_field',
 
@@ -93,13 +93,20 @@ ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]
 
 ACCOUNT_EMAIL_REQUIRED = True
 ACCOUNT_UNIQUE_EMAIL = True
+HEADLESS_ONLY = True
 
+ACCOUNT_EMAIL_CONFIRMATION_HMAC = True
+ACCOUNT_EMAIL_CONFIRMATION_EXPIRE_DAYS = 1
 ACCOUNT_EMAIL_VERIFICATION = "mandatory"
 
 ACCOUNT_CONFIRM_EMAIL_ON_GET = False
 
 HEADLESS_FRONTEND_URLS = {
     "account_confirm_email": "http://localhost:3000/auth/verify-email/{key}",
+}
+
+ACCOUNT_RATE_LIMITS = {
+    "confirm_email": "1/60s/key",
 }
 
 TEMPLATES = [
