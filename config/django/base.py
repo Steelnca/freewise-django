@@ -30,6 +30,8 @@ ALLOWED_HOSTS = ['*']
 
 USER_AGENT = env('USER_AGENT')
 
+SITE_ID = 1
+
 # Application definition
 
 INSTALLED_APPS = [
@@ -46,6 +48,8 @@ INSTALLED_APPS = [
     'allauth.account',
     'allauth.socialaccount',
     'allauth.socialaccount.providers.google',
+    "allauth.headless",
+
     'phonenumber_field',
 
     # Freewise apps
@@ -84,6 +88,19 @@ WSGI_APPLICATION = 'config.wsgi.application'
 AUTH_USER_MODEL = "users.user"
 ACCOUNT_MODEL = "accounts.account"
 
+ACCOUNT_LOGIN_METHODS = {"email"}
+ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]
+
+ACCOUNT_EMAIL_REQUIRED = True
+ACCOUNT_UNIQUE_EMAIL = True
+
+ACCOUNT_EMAIL_VERIFICATION = "mandatory"
+
+ACCOUNT_CONFIRM_EMAIL_ON_GET = False
+
+HEADLESS_FRONTEND_URLS = {
+    "account_confirm_email": "http://localhost:3000/auth/verify-email/{key}",
+}
 
 TEMPLATES = [
     {

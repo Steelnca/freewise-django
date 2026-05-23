@@ -37,7 +37,7 @@ class Account(models.Model):
     is_freelancer = models.BooleanField(default=False)
 
     # Verification
-    email_verified = models.BooleanField(default=False)
+    # Allauth handles email_verified
     phone_verified = models.BooleanField(default=False)
 
     # Timestamps

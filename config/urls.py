@@ -8,6 +8,10 @@ urlpatterns = [
     path('', include('pages.urls')),
     path('admin/', admin.site.urls),
 
+    # Accounts & Authentication
+    path("accounts/", include("allauth.urls")),
+    path("_allauth/", include("allauth.headless.urls")),
+
     # API — Auth
     path('api/auth/',          include('users.urls')),
 

@@ -1,29 +1,81 @@
+import logging
+
 from django.contrib.auth import get_user_model
-
 from rest_framework import status
-from rest_framework.views import APIView
-from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
-
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework_simplejwt.exceptions import TokenError
+
+from allauth.account.models import EmailAddress, EmailConfirmationHMAC
+from allauth.account.utils import send_email_confirmation
 
 from accounts.serializers import AccountSerializer
 from .serializers import RegisterSerializer
 from .verification import (
-    send_verification_email, verify_email_token,
-    send_phone_otp, verify_phone_otp,
+    send_phone_otp,
+    verify_phone_otp,
 )
 
+logger = logging.getLogger(__name__)
 User = get_user_model()
+
+
+def get_user_account(user):
+    return getattr(user, "account", None)
+
+
+def ensure_primary_email_address(user):
+    """
+    Keep allauth's EmailAddress table in sync with your user model.
+    This is the source of truth for email verification state.
+    """
+    email = (getattr(user, "email", "") or "").strip().lower()
+    if not email:
+        return None
+
+    email_address, created = EmailAddress.objects.get_or_create(
+        user=user,
+        email=email,
+        defaults={
+            "primary": True,
+            "verified": False,
+        },
+    )
+
+    changed = False
+    if not email_address.primary:
+        email_address.primary = True
+        changed = True
+
+    if email_address.email != email:
+        email_address.email = email
+        changed = True
+
+    if changed:
+        email_address.save(update_fields=["primary", "email"])
+
+    return email_address
+
+
+def user_has_verified_email(user):
+    email = (getattr(user, "email", "") or "").strip().lower()
+
+    qs = EmailAddress.objects.filter(user=user, verified=True)
+    if email:
+        qs = qs.filter(email__iexact=email)
+
+    return qs.exists() or EmailAddress.objects.filter(user=user, verified=True).exists()
 
 
 class RegisterView(APIView):
     """
     POST /api/auth/register/
-    Creates user (inactive until email verified), sends verification email.
-    Does NOT return JWT tokens — user must verify email then login.
+
+    Creates the user and sends an allauth verification email.
+    Does not manually flip any custom email_verified field.
     """
     permission_classes = [AllowAny]
 
@@ -31,127 +83,179 @@ class RegisterView(APIView):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        # Create user as inactive until email is verified
         user = serializer.save()
-        user.is_active = False
-        user.save(update_fields=['is_active'])
+        ensure_primary_email_address(user)
 
-        # Send verification email
         try:
-            send_verification_email(user)
-        except Exception as e:
-            # If email fails, activate anyway and log — don't block signup
-            import logging
-            logging.getLogger(__name__).error(f'Failed to send verification email to {user.email}: {e}')
-            user.is_active = True
-            user.save(update_fields=['is_active'])
-            account = getattr(user, 'account', None)
-            if account:
-                account.email_verified = True
-                account.save(update_fields=['email_verified'])
+            send_email_confirmation(request, user, signup=True)
+        except Exception:
+            logger.exception("Failed to send verification email to %s", user.email)
 
-        return Response({
-            'detail': 'Account created. Please check your email to verify your account before logging in.',
-            'email':  user.email,
-        }, status=status.HTTP_201_CREATED)
+        return Response(
+            {
+                "detail": (
+                    "Account created. Check your email to verify it before logging in."
+                ),
+                "email": user.email,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class LoginView(TokenObtainPairView):
     """
     POST /api/auth/login/
-    Standard simplejwt — username + password → tokens.
+
+    Standard SimpleJWT login, but blocked until allauth says the email is verified.
     """
     permission_classes = [AllowAny]
 
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = serializer.user
+        if not user_has_verified_email(user):
+            return Response(
+                {
+                    "detail": "Please verify your email before logging in."
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        return Response(serializer.validated_data, status=status.HTTP_200_OK)
+
 
 class LogoutView(APIView):
-    """POST /api/auth/logout/ — blacklists refresh token."""
+    """
+    POST /api/auth/logout/
+    Blacklists the refresh token.
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        refresh_token = request.data.get('refresh')
+        refresh_token = request.data.get("refresh")
         if not refresh_token:
-            return Response({'detail': 'Refresh token is required.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": "Refresh token is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
             RefreshToken(refresh_token).blacklist()
         except TokenError:
-            return Response({'detail': 'Token is invalid or already blacklisted.'}, status=status.HTTP_400_BAD_REQUEST)
-        return Response({'detail': 'Logged out.'})
+            return Response(
+                {"detail": "Token is invalid or already blacklisted."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({"detail": "Logged out."})
 
 
 class MeView(APIView):
-    """GET /api/auth/me/ — current user's account."""
+    """
+    GET /api/auth/me/
+    Returns the current user's account data.
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        account = getattr(request.user, 'account', None)
+        account = get_user_account(request.user)
         if not account:
-            return Response({'detail': 'Account not found.'}, status=status.HTTP_404_NOT_FOUND)
-        return Response(AccountSerializer(account, context={'request': request}).data)
+            return Response(
+                {"detail": "Account not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(
+            AccountSerializer(account, context={"request": request}).data
+        )
 
 
-# ─── Email verification ───────────────────────────────────────────────────────
+class VerifyEmailView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        key = request.data.get("key")
+
+        if not key:
+            return Response(
+                {"detail": "Verification key is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        confirmation = EmailConfirmationHMAC.from_key(key)
+
+        if not confirmation:
+            return Response(
+                {"detail": "Invalid or expired verification link."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        confirmation.confirm(request)
+
+        return Response(
+            {"detail": "Email verified successfully."},
+            status=status.HTTP_200_OK,
+        )
 
 class ResendVerificationEmailView(APIView):
     """
     POST /api/auth/resend-verification/
-    - Authenticated: resends to logged-in user's email
-    - Unauthenticated: accepts { email } in body and resends to that address
+
+    Authenticated:
+        Resends to the logged-in user's email.
+
+    Unauthenticated:
+        Accepts { email } and responds generically.
+        No account existence leakage.
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
-        # Authenticated path
         if request.user and request.user.is_authenticated:
             user = request.user
         else:
-            # Unauthenticated path — find user by email
-            email = request.data.get('email', '').strip().lower()
+            email = (request.data.get("email") or "").strip().lower()
             if not email:
-                return Response({'detail': 'Email is required.'}, status=status.HTTP_400_BAD_REQUEST)
-            try:
-                user = User.objects.get(email__iexact=email, is_active=False)
-            except User.DoesNotExist:
-                # Don't reveal whether email exists — always return success
-                return Response({'detail': 'If that email exists and is unverified, we sent a new link.'})
+                return Response(
+                    {"detail": "Email is required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        account = getattr(user, 'account', None)
-        if account and account.email_verified:
-            return Response({'detail': 'Email is already verified.'})
+            user = User.objects.filter(email__iexact=email).first()
+            if not user:
+                return Response(
+                    {
+                        "detail": (
+                            "If that email exists, a verification link will be sent."
+                        )
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+        ensure_primary_email_address(user)
+
+        if user_has_verified_email(user):
+            return Response(
+                {"detail": "Email is already verified."},
+                status=status.HTTP_200_OK,
+            )
 
         try:
-            send_verification_email(user)
-        except Exception as e:
-            return Response({'detail': f'Failed to send email: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            send_email_confirmation(request, user, signup=False)
+        except Exception:
+            logger.exception("Failed to resend verification email to %s", user.email)
+            return Response(
+                {"detail": "Failed to send verification email."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-        return Response({'detail': 'Verification email sent. Please check your inbox.'})
+        return Response(
+            {"detail": "Verification email sent. Please check your inbox."},
+            status=status.HTTP_200_OK,
+        )
 
-
-class VerifyEmailView(APIView):
-    """
-    POST /api/auth/verify-email/
-    Body: { uidb64, token }
-    Marks account as email_verified=True.
-    """
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        uidb64 = request.data.get('uidb64', '')
-        token  = request.data.get('token', '')
-
-        user, error = verify_email_token(uidb64, token)
-        if error:
-            return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
-
-        account = getattr(user, 'account', None)
-        if account and not account.email_verified:
-            account.email_verified = True
-            account.save(update_fields=['email_verified'])
-
-        return Response({'detail': 'Email verified successfully.'})
-
-
-# ─── Phone OTP ────────────────────────────────────────────────────────────────
 
 class RequestPhoneOTPView(APIView):
     """
@@ -161,20 +265,35 @@ class RequestPhoneOTPView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        account = getattr(request.user, 'account', None)
+        account = get_user_account(request.user)
         if not account:
-            return Response({'detail': 'Account not found.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"detail": "Account not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
         if not account.phone:
-            return Response({'detail': 'No phone number on your account. Add one in settings first.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": "No phone number on your account. Add one first."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         if account.phone_verified:
-            return Response({'detail': 'Phone already verified.'})
+            return Response(
+                {"detail": "Phone already verified."},
+                status=status.HTTP_200_OK,
+            )
 
         try:
             send_phone_otp(account)
-        except Exception as e:
-            return Response({'detail': f'Failed to send OTP: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            logger.exception("Failed to send phone OTP for user %s", request.user.id)
+            return Response(
+                {"detail": "Failed to send OTP."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-        return Response({'detail': 'OTP sent to your phone number.'})
+        return Response({"detail": "OTP sent to your phone number."})
 
 
 class VerifyPhoneOTPView(APIView):
@@ -186,16 +305,25 @@ class VerifyPhoneOTPView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        account = getattr(request.user, 'account', None)
+        account = get_user_account(request.user)
         if not account:
-            return Response({'detail': 'Account not found.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"detail": "Account not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
-        code = request.data.get('code', '').strip()
+        code = (request.data.get("code") or "").strip()
         if not code:
-            return Response({'detail': 'Code is required.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": "Code is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         success, error = verify_phone_otp(account, code)
         if not success:
-            return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": error},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        return Response({'detail': 'Phone verified successfully.'})
+        return Response({"detail": "Phone verified successfully."})

@@ -4,13 +4,15 @@ from config.env import env
 
 DEBUG = env.bool('DJANGO_DEBUG', default=False)
 
+DOMAIN = env('DOMAIN')  # e.g., "freewise.com"
+
 # Use HTTPOnly and secure cookies in production
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SECURE = True                  # True on HTTPS only (must enable in prod)
 CSRF_COOKIE_SECURE = True
 
 # Optional: set a dedicated subdomain for cookies if you use subdomains (leave None otherwise)
-SESSION_COOKIE_DOMAIN = ".freewise.com"
+SESSION_COOKIE_DOMAIN = f".{DOMAIN}" if DOMAIN else None
 
 
 R2_ACCESS_KEY_ID = env('R2_ACCESS_KEY_ID')
@@ -67,4 +69,8 @@ STATIC_URL = f"https://{R2_CUSTOM_DOMAIN}/{STATIC_LOCATION}/"
 
 MEDIA_URL = f"https://{R2_CUSTOM_DOMAIN}/{MEDIA_LOCATION}/"
 
-FRONTEND_URL="http://freewise." # !!! Set this to your actual frontend URL in production (e.g., https://freewise.com)
+FRONTEND_URL= f"http://{DOMAIN}"
+
+HEADLESS_FRONTEND_URLS = {
+    "account_confirm_email": f"https://{DOMAIN}/auth/verify-email/{{key}}",
+}
