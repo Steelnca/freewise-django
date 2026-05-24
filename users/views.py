@@ -7,7 +7,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.views import (
+    TokenObtainPairView as BaseTokenObtainPairView,
+    TokenRefreshView as BaseTokenRefreshView,
+)
 
 from allauth.account.models import EmailAddress, EmailConfirmationHMAC
 from allauth.account.utils import send_email_confirmation
@@ -15,7 +18,7 @@ from allauth.account.forms import ResetPasswordForm, ResetPasswordKeyForm
 from allauth.account.utils import url_str_to_user_pk
 
 from accounts.serializers import AccountSerializer
-from .serializers import RegisterSerializer
+from .serializers import RegisterSerializer, VersionedTokenObtainPairSerializer, VersionedTokenRefreshSerializer
 from .verification import (
     send_phone_otp,
     verify_phone_otp,
@@ -112,28 +115,14 @@ class RegisterView(APIView):
         )
 
 
-class LoginView(TokenObtainPairView):
-    """
-    POST /api/auth/login/
-
-    Standard SimpleJWT login, but blocked until allauth says the email is verified.
-    """
+class LoginView(BaseTokenObtainPairView):
     permission_classes = [AllowAny]
+    serializer_class = VersionedTokenObtainPairSerializer
 
-    def post(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
 
-        user = serializer.user
-        if not user_has_verified_email(user):
-            return Response(
-                {
-                    "detail": "Please verify your email before logging in."
-                },
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        return Response(serializer.validated_data, status=status.HTTP_200_OK)
+class RefreshTokenView(BaseTokenRefreshView):
+    permission_classes = [AllowAny]
+    serializer_class = VersionedTokenRefreshSerializer
 
 
 class LogoutView(APIView):
@@ -410,15 +399,13 @@ class ResetPasswordConfirmView(APIView):
         )
 
         if not form.is_valid():
-            errors = form.errors.get("__all__")
+            errors = []
+            for field_errors in form.errors.values():
+                errors.extend(field_errors)
 
             return Response(
                 {
-                    "detail": (
-                        errors[0]
-                        if errors
-                        else "Invalid password reset request."
-                    )
+                    "detail": errors[0] if errors else _("Invalid password reset request.")
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -473,9 +460,36 @@ class ChangePasswordView(APIView):
             )
 
         user.set_password(new_password1)
-        user.save(update_fields=["password"])
+        user.token_version += 1
+        user.save(update_fields=["password", "token_version"])
 
         return Response(
             {"detail": _("Password updated successfully.")},
+            status=status.HTTP_200_OK,
+        )
+
+class AuthenticatedForgotPasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+
+        email = (
+            getattr(user, "email", "").strip().lower()
+        )
+
+        if not email:
+            return Response(
+                {"detail": _("No email found on account.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        form = ResetPasswordForm(data={"email": email})
+
+        if form.is_valid():
+            form.save(request=request)
+
+        return Response(
+            {"detail": _("Password reset link sent to your email.")},
             status=status.HTTP_200_OK,
         )

@@ -19,6 +19,15 @@ class User(AbstractUser, LowercaseFieldsMixin):
     username = models.CharField(max_length=USERNAME_MAX_LENGTH, unique=True, validators=[username_regex, username_profanity, username_reserved_terms], db_index=True)
     is_staff = models.BooleanField(default=False)
 
+    token_version = models.PositiveIntegerField(
+        default=0,
+        help_text=_(
+            "Used to invalidate existing JWT sessions. "
+            "Incrementing this value revokes all previously issued access "
+            "and refresh tokens for the user."
+        ),
+    )
+
     class ProcessOptions:
         lowercase_fields = ['username']
 

@@ -4,6 +4,16 @@ from django.utils.translation import gettext_lazy as _
 
 from rest_framework import serializers
 
+from rest_framework_simplejwt.exceptions import InvalidToken
+from rest_framework_simplejwt.serializers import (
+    TokenObtainPairSerializer,
+    TokenRefreshSerializer,
+)
+from rest_framework_simplejwt.settings import api_settings
+
+User = get_user_model()
+
+
 from .constants import USERNAME_MIN_LENGTH, USERNAME_MAX_LENGTH
 from .validators import username_regex, username_profanity, username_reserved_terms
 
@@ -52,3 +62,30 @@ class UserSerializer(serializers.ModelSerializer):
         model  = User
         fields = ('id', 'username', 'email', 'is_active', 'date_joined')
         read_only_fields = fields
+
+class VersionedTokenObtainPairSerializer(TokenObtainPairSerializer):
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+        token["token_version"] = user.token_version
+        return token
+
+
+class VersionedTokenRefreshSerializer(TokenRefreshSerializer):
+    def validate(self, attrs):
+        refresh = self.token_class(attrs["refresh"])
+
+        user_id = refresh.get(api_settings.USER_ID_CLAIM)
+        token_version = refresh.get("token_version")
+
+        if user_id is None or token_version is None:
+            raise InvalidToken("Token is invalid or expired.")
+
+        user = User.objects.filter(**{api_settings.USER_ID_FIELD: user_id}).first()
+        if not user:
+            raise InvalidToken("Token is invalid or expired.")
+
+        if user.token_version != token_version:
+            raise InvalidToken("Token is no longer valid. Please sign in again.")
+
+        return super().validate(attrs)

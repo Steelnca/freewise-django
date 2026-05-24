@@ -1,10 +1,9 @@
 from django.urls import path
-from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
-    RegisterView, LoginView, LogoutView, MeView,
+    RegisterView, LoginView, LogoutView, RefreshTokenView, MeView,
     ResendVerificationEmailView, VerifyEmailView,
     RequestPhoneOTPView, VerifyPhoneOTPView,
-    ForgotPasswordView, ResetPasswordConfirmView, ChangePasswordView,
+    ForgotPasswordView, ResetPasswordConfirmView, ChangePasswordView, AuthenticatedForgotPasswordView,
 )
 
 urlpatterns = [
@@ -12,7 +11,7 @@ urlpatterns = [
     path('register/', RegisterView.as_view(),    name='auth-register'),
     path('login/',    LoginView.as_view(),        name='auth-login'),
     path('logout/',   LogoutView.as_view(),       name='auth-logout'),
-    path('refresh/',  TokenRefreshView.as_view(), name='auth-refresh'),
+    path('refresh/',  RefreshTokenView.as_view(), name='auth-refresh'),
     path('me/',       MeView.as_view(),           name='auth-me'),
 
     # Email verification
@@ -25,5 +24,6 @@ urlpatterns = [
 
     path("forgot-password/", ForgotPasswordView.as_view(), name="auth-forgot-password"),
     path("reset-password/", ResetPasswordConfirmView.as_view(), name="auth-reset-password"),
-    path("change-password/", ChangePasswordView.as_view(), name="auth-change-password"),
+    path("security/change-password/", ChangePasswordView.as_view(), name="auth-security-change-password"),
+    path("security/forgot-password/", AuthenticatedForgotPasswordView.as_view(), name="auth-security-forgot-password"),
 ]
