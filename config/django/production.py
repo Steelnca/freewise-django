@@ -72,5 +72,12 @@ MEDIA_URL = f"https://{R2_CUSTOM_DOMAIN}/{MEDIA_LOCATION}/"
 FRONTEND_URL= f"http://{DOMAIN}"
 
 HEADLESS_FRONTEND_URLS = {
-    "account_confirm_email": f"https://{DOMAIN}/auth/verify-email/{{key}}",
+    "account_confirm_email":
+        f"https://{DOMAIN}/auth/verify-email/{{key}}",
+
+    "account_reset_password":
+        f"https://{DOMAIN}/auth/forgot-password",
+
+    "account_reset_password_from_key":
+        f"https://{DOMAIN}/auth/reset-password/{{key}}",
 }

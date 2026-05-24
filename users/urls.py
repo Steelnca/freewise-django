@@ -4,6 +4,7 @@ from .views import (
     RegisterView, LoginView, LogoutView, MeView,
     ResendVerificationEmailView, VerifyEmailView,
     RequestPhoneOTPView, VerifyPhoneOTPView,
+    ForgotPasswordView, ResetPasswordConfirmView, ChangePasswordView,
 )
 
 urlpatterns = [
@@ -21,4 +22,8 @@ urlpatterns = [
     # Phone OTP
     path('phone/request-otp/', RequestPhoneOTPView.as_view(), name='auth-phone-request-otp'),
     path('phone/verify/',      VerifyPhoneOTPView.as_view(),  name='auth-phone-verify'),
+
+    path("forgot-password/", ForgotPasswordView.as_view(), name="auth-forgot-password"),
+    path("reset-password/", ResetPasswordConfirmView.as_view(), name="auth-reset-password"),
+    path("change-password/", ChangePasswordView.as_view(), name="auth-change-password"),
 ]

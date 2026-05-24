@@ -11,6 +11,8 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 from allauth.account.models import EmailAddress, EmailConfirmationHMAC
 from allauth.account.utils import send_email_confirmation
+from allauth.account.forms import ResetPasswordForm, ResetPasswordKeyForm
+from allauth.account.utils import url_str_to_user_pk
 
 from accounts.serializers import AccountSerializer
 from .serializers import RegisterSerializer
@@ -21,6 +23,10 @@ from .verification import (
 
 from urllib.parse import unquote
 from django.utils.translation import gettext as _
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+
+
 
 
 logger = logging.getLogger(__name__)
@@ -214,16 +220,15 @@ class ResendVerificationEmailView(APIView):
 
             if not email:
                 return Response(
-                    {"detail": _("Email is required.")},
+                    {"detail": "Email is required."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
             user = User.objects.filter(email__iexact=email).first()
-
             if not user:
                 return Response(
                     {
-                        "detail": _(
+                        "detail": (
                             "If that email exists, a verification link will be sent."
                         )
                     },
@@ -237,32 +242,27 @@ class ResendVerificationEmailView(APIView):
 
         if not email_address:
             return Response(
-                {"detail": _("Email configuration error.")},
+                {"detail": "Email configuration error."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
         if email_address.verified:
             return Response(
-                {"detail": _("Email is already verified.")},
+                {"detail": "Email is already verified."},
                 status=status.HTTP_200_OK,
             )
 
         try:
             send_email_confirmation(request, user, signup=True)
-
         except Exception:
-            logger.exception(
-                "Failed to resend verification email to %s",
-                user.email,
-            )
-
+            logger.exception("Failed to resend verification email to %s", user.email)
             return Response(
-                {"detail": _("Failed to send verification email.")},
+                {"detail": "Failed to send verification email."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
         return Response(
-            {"detail": _("Verification email resent successfully. Please check your inbox.")},
+            {"detail": "Verification email sent. Please check your inbox."},
             status=status.HTTP_200_OK,
         )
 
@@ -307,6 +307,7 @@ class RequestPhoneOTPView(APIView):
 
 
 class VerifyPhoneOTPView(APIView):
+
     """
     POST /api/auth/phone/verify/
     Body: { code }
@@ -336,4 +337,145 @@ class VerifyPhoneOTPView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        return Response({"detail": "Phone verified successfully."})
+        return Response({"detail": _("Phone verified successfully.")})
+
+
+
+class ForgotPasswordView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = (request.data.get("email") or "").strip().lower()
+
+        if not email:
+            return Response(
+                {"detail": _("Email is required.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        form = ResetPasswordForm(data={"email": email})
+
+        if form.is_valid():
+            form.save(request=request)
+
+        return Response(
+            {
+                "detail": (
+                    _("If an account with that email exists, a password reset link has been sent.")
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+
+class ResetPasswordConfirmView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        key = unquote(request.data.get("key", ""))
+
+        password1 = request.data.get("password1")
+        password2 = request.data.get("password2")
+
+        if not key:
+            return Response(
+                {"detail": "Reset key is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            # allauth format:
+            # uid-tempkey
+
+            uidb36, _, temp_key = key.partition("-")
+
+            user_pk = url_str_to_user_pk(uidb36)
+            user = User.objects.get(pk=user_pk)
+
+        except Exception as e:
+            logger.error("Error occurred while resetting password: %s", e)
+            return Response(
+                {"detail": "Invalid or expired reset link."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        form = ResetPasswordKeyForm(
+            user=user,
+            temp_key=temp_key,
+            data={
+                "password1": password1,
+                "password2": password2,
+            },
+        )
+
+        if not form.is_valid():
+            errors = form.errors.get("__all__")
+
+            return Response(
+                {
+                    "detail": (
+                        errors[0]
+                        if errors
+                        else "Invalid password reset request."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        form.save()
+
+        return Response(
+            {"detail": "Password reset successfully."},
+            status=status.HTTP_200_OK,
+        )
+
+class ChangePasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+
+        current_password = request.data.get("current_password")
+        new_password1 = request.data.get("new_password1")
+        new_password2 = request.data.get("new_password2")
+
+        if not current_password:
+            return Response(
+                {"detail": _("Current password is required.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not new_password1 or not new_password2:
+            return Response(
+                {"detail": _("New password fields are required.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not user.check_password(current_password):
+            return Response(
+                {"detail": _("Current password is incorrect.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if new_password1 != new_password2:
+            return Response(
+                {"detail": _("New passwords do not match.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            validate_password(new_password1, user=user)
+        except ValidationError as e:
+            return Response(
+                {"detail": e.messages[0]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user.set_password(new_password1)
+        user.save(update_fields=["password"])
+
+        return Response(
+            {"detail": _("Password updated successfully.")},
+            status=status.HTTP_200_OK,
+        )

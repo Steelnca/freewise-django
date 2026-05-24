@@ -84,6 +84,7 @@ ROOT_URLCONF = 'config.urls'
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
+FRONTEND_URL = "http://localhost:3000"
 
 AUTH_USER_MODEL = "users.user"
 ACCOUNT_MODEL = "accounts.account"
@@ -102,7 +103,14 @@ ACCOUNT_EMAIL_VERIFICATION = "mandatory"
 ACCOUNT_CONFIRM_EMAIL_ON_GET = False
 
 HEADLESS_FRONTEND_URLS = {
-    "account_confirm_email": "http://localhost:3000/auth/verify-email/{key}",
+    "account_confirm_email":
+        "http://localhost:3000/auth/verify-email/{key}",
+
+    "account_reset_password":
+        "http://localhost:3000/auth/forgot-password",
+
+    "account_reset_password_from_key":
+        "http://localhost:3000/auth/reset-password/{key}",
 }
 
 ACCOUNT_RATE_LIMITS = {
