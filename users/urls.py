@@ -15,7 +15,7 @@ urlpatterns = [
     path('me/',       MeView.as_view(),           name='auth-me'),
 
     # Email verification
-    path('verify-email/',        VerifyEmailView.as_view(),             name='auth-verify-email'),
+    path('verify-email/',        VerifyEmailView.as_view(), name='auth-verify-email'),
     path('resend-verification/', ResendVerificationEmailView.as_view(), name='auth-resend-verification'),
 
     # Phone OTP
