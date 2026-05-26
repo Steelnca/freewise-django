@@ -147,9 +147,11 @@ class WalletTransaction(TimeStampedModel):
 
     class Status(models.TextChoices):
         PENDING = "pending", _("Pending")
-        COMPLETED = "completed", _("Completed")
+        PROCESSING = "processing", _("Processing")
+        SUCCEEDED = "succeeded", _("Succeeded")
         FAILED = "failed", _("Failed")
-        REVERSED = "reversed", _("Reversed")
+        CANCELLED = "cancelled", _("Cancelled")
+        REFUNDED = "refunded", _("Refunded")
 
     wallet = models.ForeignKey(
         Wallet,
@@ -206,12 +208,20 @@ class WalletTransaction(TimeStampedModel):
         verbose_name=_("balance before"),
         help_text=_("Wallet balance before this transaction was applied."),
     )
+
     balance_after = models.DecimalField(
         max_digits=MONEY_MAX_DIGITS,
         decimal_places=MONEY_DECIMAL_PLACES,
         default=Decimal("0.00"),
         verbose_name=_("balance after"),
         help_text=_("Wallet balance after this transaction was applied."),
+    )
+
+    processed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("processed at"),
+        help_text=_("When the provider webhook successfully processed this payment."),
     )
 
     # Generic references so we do not tightly couple payments to future app structure.

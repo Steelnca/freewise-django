@@ -41,6 +41,7 @@ from .services import (
     request_payout,
 )
 from .constants import DEFAULT_CURRENCY
+from .webhooks import process_successful_payment
 
 logger = logging.getLogger(__name__)
 
@@ -224,120 +225,67 @@ class FundMilestoneView(APIView):
         )
 
 
-@method_decorator(csrf_exempt, name="dispatch")
 class ChargilyWebhookView(APIView):
     """
-    POST /api/payments/webhook/
-    Receives Chargily events and reconciles them into the ledger.
+    POST /api/payments/webhooks/chargily/
+
+    Handles Chargily payment webhooks.
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
-        payload = request.body
-        signature = request.headers.get("signature", "")
+        payload = request.data
 
-        if not chargily.verify_webhook_signature(payload, signature):
+        provider_reference = payload.get("invoice_id")
+        status_value = payload.get("status")
+
+        if not provider_reference:
             return Response(
-                {"detail": _("Invalid signature.")},
+                {"detail": _("Missing provider reference.")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            data = json.loads(payload)
-        except json.JSONDecodeError:
+        payment = WalletTransaction.objects.filter(
+            provider_reference=provider_reference
+        ).first()
+
+        if not payment:
             return Response(
-                {"detail": _("Invalid JSON.")},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"detail": _("Payment not found.")},
+                status=status.HTTP_404_NOT_FOUND,
             )
 
-        event_id = data.get("id", "")
-        event_type = data.get("type", "")
-
-        log, created = WebhookLog.objects.get_or_create(
+        webhook_log = WebhookLog.objects.create(
             provider_name="chargily",
-            provider_event_id=event_id,
-            defaults={
-                "event_name": event_type,
-                "raw_body": payload.decode("utf-8", errors="replace"),
-                "payload": data,
-                "headers": dict(request.headers),
-            },
+            event_type=status_value or "unknown",
+            payload=payload,
+            provider_reference=provider_reference,
         )
 
-        if log.processed:
-            return Response({"detail": _("Already processed.")}, status=status.HTTP_200_OK)
-
         try:
-            self._handle_event(event_type, data, event_id)
-            log.status = WebhookLog.Status.PROCESSED
-            log.processed = True
-            log.processed_at = timezone.now()
-            log.save(update_fields=["status", "processed", "processed_at", "updated_at"])
+            if status_value == "paid":
+                process_successful_payment(payment=payment)
+
+            webhook_log.processed = True
+            webhook_log.save(update_fields=["processed", "updated_at"])
+
         except Exception as exc:
-            logger.exception("Chargily webhook processing failed.")
-            log.status = WebhookLog.Status.FAILED
-            log.processing_error = str(exc)
-            log.save(update_fields=["status", "processing_error", "updated_at"])
-            return Response(
-                {"detail": _("Processing error.")},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            webhook_log.processing_error = str(exc)
+            webhook_log.save(
+                update_fields=[
+                    "processing_error",
+                    "updated_at",
+                ]
             )
 
-        return Response({"detail": _("OK")}, status=status.HTTP_200_OK)
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-    def _handle_event(self, event_type: str, data: dict, event_id: str):
-        payload_data = data.get("data") or {}
-        metadata = payload_data.get("metadata") or data.get("metadata") or {}
-
-        if event_type != "checkout.paid":
-            return
-
-        milestone_id = metadata.get("milestone_id")
-        if not milestone_id:
-            raise ValueError("Missing milestone_id in Chargily metadata.")
-
-        milestone = Milestone.objects.select_related(
-            "contract__client__account__user"
-        ).get(pk=milestone_id)
-
-        # Idempotency is handled in the service layer; repeated webhooks are safe.
-        wallet = get_or_create_wallet_for_user(
-            milestone.contract.client.account.user,
-            currency=DEFAULT_CURRENCY,
+        return Response(
+            {"detail": _("Webhook processed successfully.")},
+            status=status.HTTP_200_OK,
         )
-
-        record_deposit(
-            wallet=wallet,
-            amount=milestone.amount,
-            idempotency_key=f"chargily:{event_id}:deposit",
-            provider_name="chargily",
-            provider_reference=payload_data.get("payment_id", ""),
-            reference_type="milestone",
-            reference_id=str(milestone.pk),
-            description=_("Client payment received."),
-            metadata={
-                "milestone_id": milestone.pk,
-                "contract_id": milestone.contract_id,
-            },
-        )
-
-        hold_funds_for_escrow(
-            wallet=wallet,
-            amount=milestone.amount,
-            contract_reference=f"contract:{milestone.contract_id}",
-            idempotency_key=f"chargily:{event_id}:escrow",
-            reference_type="milestone",
-            reference_id=str(milestone.pk),
-            description=_("Funds moved into escrow."),
-            metadata={
-                "milestone_id": milestone.pk,
-                "contract_id": milestone.contract_id,
-            },
-        )
-
-        if milestone.status != Milestone.Status.FUNDED:
-            milestone.status = Milestone.Status.FUNDED
-            milestone.paid_at = timezone.now() if hasattr(milestone, "paid_at") else None
-            milestone.save(update_fields=["status", "updated_at"])
 
 
