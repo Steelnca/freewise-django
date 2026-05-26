@@ -35,12 +35,12 @@ from .serializers import (
     PayoutRequestSerializer,
 )
 from .services import (
-    DEFAULT_CURRENCY,
     get_or_create_wallet_for_user,
     record_deposit,
     hold_funds_for_escrow,
     request_payout,
 )
+from .constants import DEFAULT_CURRENCY
 
 logger = logging.getLogger(__name__)
 
@@ -57,27 +57,40 @@ class WalletView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        wallet = Wallet.objects.filter(user=request.user).first()
-        if not wallet:
-            return Response(
-                {"detail": _("Wallet not found.")},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        return Response(WalletSerializer(wallet).data)
+        wallet = get_or_create_wallet_for_user(
+            request.user,
+            currency=DEFAULT_CURRENCY,
+        )
 
+        return Response(
+            WalletSerializer(wallet).data,
+            status=status.HTTP_200_OK,
+        )
+
+class WalletTransactionsView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = WalletTransactionSerializer
+
+    def get_queryset(self):
+        wallet = get_or_create_wallet_for_user(
+            self.request.user,
+            currency=DEFAULT_CURRENCY,
+        )
+        return (
+            WalletTransaction.objects.filter(wallet=wallet)
+            .select_related("wallet", "initiated_by")
+            .order_by("-created_at")
+        )
 
 class MyEscrowView(generics.ListAPIView):
-    """
-    GET /api/payments/escrow/
-    Returns escrow holds for the current user's wallet.
-    """
     permission_classes = [IsAuthenticated]
     serializer_class = EscrowHoldSerializer
 
     def get_queryset(self):
-        wallet = Wallet.objects.filter(user=self.request.user).first()
-        if not wallet:
-            return EscrowHold.objects.none()
+        wallet = get_or_create_wallet_for_user(
+            self.request.user,
+            currency=DEFAULT_CURRENCY,
+        )
         return (
             EscrowHold.objects.filter(wallet=wallet)
             .select_related("wallet", "funding_transaction", "resolution_transaction")
@@ -86,17 +99,14 @@ class MyEscrowView(generics.ListAPIView):
 
 
 class MyPayoutsView(generics.ListAPIView):
-    """
-    GET /api/payments/payouts/
-    Returns payout history for the current user's wallet.
-    """
     permission_classes = [IsAuthenticated]
     serializer_class = PayoutSerializer
 
     def get_queryset(self):
-        wallet = Wallet.objects.filter(user=self.request.user).first()
-        if not wallet:
-            return Payout.objects.none()
+        wallet = get_or_create_wallet_for_user(
+            self.request.user,
+            currency=DEFAULT_CURRENCY,
+        )
         return (
             Payout.objects.filter(wallet=wallet)
             .select_related("wallet", "ledger_transaction")
@@ -331,20 +341,3 @@ class ChargilyWebhookView(APIView):
             milestone.save(update_fields=["status", "updated_at"])
 
 
-class WalletTransactionsView(generics.ListAPIView):
-    """
-    GET /api/payments/transactions/
-    Returns the current user's wallet transaction history.
-    """
-    permission_classes = [IsAuthenticated]
-    serializer_class = WalletTransactionSerializer
-
-    def get_queryset(self):
-        wallet = Wallet.objects.filter(user=self.request.user).first()
-        if not wallet:
-            return WalletTransaction.objects.none()
-        return (
-            WalletTransaction.objects.filter(wallet=wallet)
-            .select_related("wallet", "initiated_by")
-            .order_by("-created_at")
-        )
