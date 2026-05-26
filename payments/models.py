@@ -137,21 +137,19 @@ class WalletTransaction(TimeStampedModel):
 
     class Type(models.TextChoices):
         DEPOSIT = "deposit", _("Deposit")
-        ESCROW_HOLD = "escrow_hold", _("Escrow hold")
-        ESCROW_RELEASE = "escrow_release", _("Escrow release")
-        PLATFORM_FEE = "platform_fee", _("Platform fee")
+        ESCROW_HOLD = "escrow_hold", _("Escrow Hold")
+        ESCROW_RELEASE = "escrow_release", _("Escrow Release")
+        PAYOUT = "payout", _("Payout")
         REFUND = "refund", _("Refund")
-        WITHDRAWAL = "withdrawal", _("Withdrawal")
+        PLATFORM_FEE = "platform_fee", _("Platform Fee")
         ADJUSTMENT = "adjustment", _("Adjustment")
-        DISPUTE_HOLD = "dispute_hold", _("Dispute hold")
 
     class Status(models.TextChoices):
         PENDING = "pending", _("Pending")
         PROCESSING = "processing", _("Processing")
-        SUCCEEDED = "succeeded", _("Succeeded")
+        COMPLETED = "completed", _("Completed")
         FAILED = "failed", _("Failed")
-        CANCELLED = "cancelled", _("Cancelled")
-        REFUNDED = "refunded", _("Refunded")
+        REVERSED = "reversed", _("Reversed")
 
     wallet = models.ForeignKey(
         Wallet,

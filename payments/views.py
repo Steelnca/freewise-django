@@ -169,7 +169,8 @@ class RequestPayoutView(APIView):
 class FundMilestoneView(APIView):
     """
     POST /api/payments/fund/<milestone_id>/
-    Creates the Chargily checkout for a milestone.
+    Creates the Chargily checkout for a milestone and stores a pending
+    wallet transaction so the webhook can settle it later.
     """
     permission_classes = [IsAuthenticated]
 
@@ -194,10 +195,37 @@ class FundMilestoneView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        client_user = milestone.contract.client.account.user
+        wallet = get_or_create_wallet_for_user(
+            client_user,
+            currency=milestone.currency or DEFAULT_CURRENCY,
+        )
+
+        idempotency_key = f"chargily:checkout:milestone:{milestone.pk}"
+
+        existing = WalletTransaction.objects.filter(
+            idempotency_key=idempotency_key,
+            provider_name="chargily",
+            reference_type="milestone",
+            reference_id=str(milestone.pk),
+        ).first()
+
+        if existing and (existing.metadata or {}).get("checkout_url"):
+            return Response(
+                {
+                    "checkout_url": existing.metadata["checkout_url"],
+                    "checkout_id": (existing.metadata or {}).get("checkout_id", ""),
+                    "milestone_id": milestone.pk,
+                    "amount": str(milestone.amount),
+                    "currency": milestone.currency or DEFAULT_CURRENCY,
+                },
+                status=status.HTTP_200_OK,
+            )
+
         base_url = request.build_absolute_uri("/").rstrip("/")
         success_url = f"{base_url}/dashboard/payments/success"
         failure_url = f"{base_url}/dashboard/payments/failure"
-        webhook_url = request.build_absolute_uri("/api/payments/webhook/")
+        webhook_url = request.build_absolute_uri("/api/payments/webhooks/chargily/")
 
         try:
             checkout = chargily.create_checkout(
@@ -206,24 +234,97 @@ class FundMilestoneView(APIView):
                 failure_url,
                 webhook_url,
             )
-        except Exception as exc:
-            logger.exception("Chargily checkout creation failed for milestone %s", milestone.pk)
+        except Exception:
+            logger.exception(
+                "Chargily checkout creation failed for milestone %s",
+                milestone.pk,
+            )
             return Response(
                 {"detail": _("Payment gateway error.")},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        checkout_id = str(checkout.get("id", "")).strip()
+        checkout_url = checkout.get("checkout_url", "")
+
+        pending_tx_defaults = {
+            "wallet": wallet,
+            "initiated_by": request.user,
+            "transaction_type": WalletTransaction.Type.DEPOSIT,
+            "status": WalletTransaction.Status.PENDING,
+            "amount": milestone.amount,
+            "currency": milestone.currency or DEFAULT_CURRENCY,
+            "balance_before": wallet.available_balance,
+            "balance_after": wallet.available_balance,
+            "reference_type": "milestone",
+            "reference_id": str(milestone.pk),
+            "provider_name": "chargily",
+            "provider_reference": checkout_id,
+            "description": _("Milestone checkout created."),
+            "metadata": {
+                "checkout_id": checkout_id,
+                "checkout_url": checkout_url,
+                "milestone_id": milestone.pk,
+                "contract_id": milestone.contract_id,
+            },
+        }
+
+        tx, created = WalletTransaction.objects.get_or_create(
+            idempotency_key=idempotency_key,
+            defaults=pending_tx_defaults,
+        )
+
+        if not created:
+            tx.wallet = wallet
+            tx.initiated_by = request.user
+            tx.transaction_type = WalletTransaction.Type.DEPOSIT
+            tx.status = WalletTransaction.Status.PENDING
+            tx.amount = milestone.amount
+            tx.currency = milestone.currency or DEFAULT_CURRENCY
+            tx.balance_before = wallet.available_balance
+            tx.balance_after = wallet.available_balance
+            tx.reference_type = "milestone"
+            tx.reference_id = str(milestone.pk)
+            tx.provider_name = "chargily"
+            tx.provider_reference = checkout_id
+            tx.description = _("Milestone checkout created.")
+            tx.metadata = {
+                "checkout_id": checkout_id,
+                "checkout_url": checkout_url,
+                "milestone_id": milestone.pk,
+                "contract_id": milestone.contract_id,
+            }
+            tx.full_clean()
+            tx.save(
+                update_fields=[
+                    "wallet",
+                    "initiated_by",
+                    "transaction_type",
+                    "status",
+                    "amount",
+                    "currency",
+                    "balance_before",
+                    "balance_after",
+                    "reference_type",
+                    "reference_id",
+                    "provider_name",
+                    "provider_reference",
+                    "description",
+                    "metadata",
+                    "updated_at",
+                ]
+            )
+
         return Response(
             {
-                "checkout_url": checkout.get("checkout_url"),
-                "checkout_id": checkout.get("id", ""),
+                "checkout_url": checkout_url,
+                "checkout_id": checkout_id,
                 "milestone_id": milestone.pk,
                 "amount": str(milestone.amount),
-                "currency": DEFAULT_CURRENCY,
+                "currency": milestone.currency or DEFAULT_CURRENCY,
             },
             status=status.HTTP_200_OK,
         )
-
 
 class ChargilyWebhookView(APIView):
     """
@@ -329,3 +430,5 @@ class ChargilyWebhookView(APIView):
             {"detail": _("Webhook processed successfully.")},
             status=status.HTTP_200_OK,
         )
+
+

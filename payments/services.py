@@ -225,7 +225,7 @@ def create_wallet_transaction(
     balance_before: Decimal,
     balance_after: Decimal,
     idempotency_key: str,
-    status: str = WalletTransaction.Status.SUCCEEDED,
+    status: str = WalletTransaction.Status.COMPLETED,
     reference_type: str = "",
     reference_id: str = "",
     provider_name: str = "",
