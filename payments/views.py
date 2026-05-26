@@ -41,7 +41,7 @@ from .services import (
     request_payout,
 )
 from .constants import DEFAULT_CURRENCY
-from .webhooks import process_successful_payment
+from .webhooks import PaymentWebhookError, reconcile_chargily_webhook_log
 
 logger = logging.getLogger(__name__)
 
@@ -228,58 +228,100 @@ class FundMilestoneView(APIView):
 class ChargilyWebhookView(APIView):
     """
     POST /api/payments/webhooks/chargily/
-
     Handles Chargily payment webhooks.
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
-        payload = request.data
+        raw_body = request.body
+        signature = request.headers.get("signature", "")
+        signature_valid = chargily.verify_webhook_signature(raw_body, signature)
 
-        provider_reference = payload.get("invoice_id")
-        status_value = payload.get("status")
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            return Response(
+                {"detail": _("Invalid JSON.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        if not provider_reference:
+        provider_event_id = str(
+            payload.get("invoice_id") or payload.get("payment_id") or payload.get("id") or ""
+        ).strip()
+        event_name = str(payload.get("status") or payload.get("event") or "unknown").strip()
+
+        if not provider_event_id:
             return Response(
                 {"detail": _("Missing provider reference.")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        payment = WalletTransaction.objects.filter(
-            provider_reference=provider_reference
-        ).first()
-
-        if not payment:
-            return Response(
-                {"detail": _("Payment not found.")},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        webhook_log = WebhookLog.objects.create(
+        webhook_log, _ = WebhookLog.objects.get_or_create(
             provider_name="chargily",
-            event_type=status_value or "unknown",
-            payload=payload,
-            provider_reference=provider_reference,
+            provider_event_id=provider_event_id,
+            defaults={
+                "event_name": event_name,
+                "status": WebhookLog.Status.RECEIVED,
+                "signature_valid": signature_valid,
+                "raw_body": raw_body.decode("utf-8", errors="replace"),
+                "payload": payload,
+                "headers": dict(request.headers),
+            },
         )
 
-        try:
-            if status_value == "paid":
-                process_successful_payment(payment=payment)
-
-            webhook_log.processed = True
-            webhook_log.save(update_fields=["processed", "updated_at"])
-
-        except Exception as exc:
-            webhook_log.processing_error = str(exc)
-            webhook_log.save(
-                update_fields=[
-                    "processing_error",
-                    "updated_at",
-                ]
+        if webhook_log.processed:
+            return Response(
+                {"detail": _("Already processed.")},
+                status=status.HTTP_200_OK,
             )
 
+        webhook_log.signature_valid = signature_valid
+        webhook_log.event_name = event_name
+        webhook_log.raw_body = raw_body.decode("utf-8", errors="replace")
+        webhook_log.payload = payload
+        webhook_log.headers = dict(request.headers)
+        webhook_log.save(
+            update_fields=[
+                "signature_valid",
+                "event_name",
+                "raw_body",
+                "payload",
+                "headers",
+                "updated_at",
+            ]
+        )
+
+        if not signature_valid:
+            webhook_log.status = WebhookLog.Status.FAILED
+            webhook_log.processing_error = _("Invalid webhook signature.")
+            webhook_log.save(
+                update_fields=["status", "processing_error", "updated_at"]
+            )
+            return Response(
+                {"detail": _("Invalid signature.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            reconcile_chargily_webhook_log(webhook_log=webhook_log)
+        except PaymentWebhookError as exc:
+            webhook_log.status = WebhookLog.Status.FAILED
+            webhook_log.processing_error = str(exc)
+            webhook_log.save(
+                update_fields=["status", "processing_error", "updated_at"]
+            )
             return Response(
                 {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as exc:
+            webhook_log.status = WebhookLog.Status.FAILED
+            webhook_log.processing_error = str(exc)
+            webhook_log.save(
+                update_fields=["status", "processing_error", "updated_at"]
+            )
+            return Response(
+                {"detail": _("Webhook processing failed.")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -287,5 +329,3 @@ class ChargilyWebhookView(APIView):
             {"detail": _("Webhook processed successfully.")},
             status=status.HTTP_200_OK,
         )
-
-

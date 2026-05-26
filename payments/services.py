@@ -91,14 +91,12 @@ def normalize_money(value: Decimal | str | int | float) -> Decimal:
     amount = Decimal(str(value)).quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
     return amount
 
-
 def validate_positive_money(amount: Decimal) -> None:
     """
     Money amounts used by the ledger must always be positive.
     """
     if amount <= 0:
         raise ValidationError({"amount": _("Amount must be greater than zero.")})
-
 
 def validate_currency(currency: str) -> str:
     """
@@ -109,7 +107,6 @@ def validate_currency(currency: str) -> str:
         raise ValidationError({"currency": _("Currency must be a 3-letter ISO code.")})
     return code
 
-
 def build_metadata(base: Optional[Dict[str, Any]] = None, **extra: Any) -> Dict[str, Any]:
     """
     Merge metadata dictionaries without mutating input values.
@@ -119,7 +116,6 @@ def build_metadata(base: Optional[Dict[str, Any]] = None, **extra: Any) -> Dict[
         if value is not None:
             data[key] = value
     return data
-
 
 def lock_wallets(wallets: Iterable[Wallet]) -> Dict[int, Wallet]:
     """
@@ -143,14 +139,12 @@ def lock_wallets(wallets: Iterable[Wallet]) -> Dict[int, Wallet]:
 
     return locked_map
 
-
 def ensure_wallet_active(wallet: Wallet) -> None:
     """
     Block money movement when a wallet is frozen.
     """
     if wallet.status != Wallet.Status.ACTIVE:
         raise WalletFrozenError(_("This wallet is frozen."))
-
 
 def get_or_create_wallet_for_user(
     user: User,
@@ -180,13 +174,11 @@ def get_or_create_wallet_for_user(
 
     return wallet
 
-
 def _get_locked_wallet(wallet: Wallet) -> Wallet:
     """
     Reload a single wallet row using SELECT ... FOR UPDATE.
     """
     return Wallet.objects.select_for_update().get(pk=wallet.pk)
-
 
 def _wallet_snapshot(wallet: Wallet) -> Dict[str, Any]:
     """
@@ -203,7 +195,6 @@ def _wallet_snapshot(wallet: Wallet) -> Dict[str, Any]:
         "escrow_balance": str(wallet.escrow_balance),
         "status": wallet.status,
     }
-
 
 def _get_or_return_existing_transaction(
     *,
@@ -224,7 +215,6 @@ def _get_or_return_existing_transaction(
         idempotency_key=idempotency_key
     ).first()
 
-
 def create_wallet_transaction(
     *,
     wallet: Wallet,
@@ -235,7 +225,7 @@ def create_wallet_transaction(
     balance_before: Decimal,
     balance_after: Decimal,
     idempotency_key: str,
-    status: str = WalletTransaction.Status.COMPLETED,
+    status: str = WalletTransaction.Status.SUCCEEDED,
     reference_type: str = "",
     reference_id: str = "",
     provider_name: str = "",
