@@ -3,17 +3,17 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 
 from .models import Notification
+from .services import create_notification
 
 
-def notify(account, type_, title, message, link=''):
-    Notification.objects.create(
+def notify(account, type_, title, message, link=""):
+    create_notification(
         account=account,
-        type=type_,
+        notification_type=type_,
         title=title,
         message=message,
         link=link,
     )
-
 
 # ── Proposals ────────────────────────────────────────────────────────────────
 

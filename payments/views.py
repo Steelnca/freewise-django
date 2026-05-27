@@ -165,12 +165,12 @@ class RequestPayoutView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
-
 class FundMilestoneView(APIView):
     """
     POST /api/payments/fund/<milestone_id>/
-    Creates the Chargily checkout for a milestone and stores a pending
-    wallet transaction so the webhook can settle it later.
+
+    Creates a Chargily checkout for the milestone and stores a pending
+    local transaction so the webhook can settle it later.
     """
     permission_classes = [IsAuthenticated]
 
@@ -195,32 +195,34 @@ class FundMilestoneView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        client_user = milestone.contract.client.account.user
         wallet = get_or_create_wallet_for_user(
-            client_user,
+            request.user,
             currency=milestone.currency or DEFAULT_CURRENCY,
         )
 
         idempotency_key = f"chargily:checkout:milestone:{milestone.pk}"
 
-        existing = WalletTransaction.objects.filter(
+        existing_tx = WalletTransaction.objects.filter(
             idempotency_key=idempotency_key,
             provider_name="chargily",
             reference_type="milestone",
             reference_id=str(milestone.pk),
         ).first()
 
-        if existing and (existing.metadata or {}).get("checkout_url"):
-            return Response(
-                {
-                    "checkout_url": existing.metadata["checkout_url"],
-                    "checkout_id": (existing.metadata or {}).get("checkout_id", ""),
-                    "milestone_id": milestone.pk,
-                    "amount": str(milestone.amount),
-                    "currency": milestone.currency or DEFAULT_CURRENCY,
-                },
-                status=status.HTTP_200_OK,
-            )
+        if existing_tx and isinstance(existing_tx.metadata, dict):
+            checkout_url = existing_tx.metadata.get("checkout_url", "")
+            checkout_id = existing_tx.metadata.get("checkout_id", "")
+            if checkout_url:
+                return Response(
+                    {
+                        "checkout_url": checkout_url,
+                        "checkout_id": checkout_id,
+                        "milestone_id": milestone.pk,
+                        "amount": str(milestone.amount),
+                        "currency": milestone.currency or DEFAULT_CURRENCY,
+                    },
+                    status=status.HTTP_200_OK,
+                )
 
         base_url = request.build_absolute_uri("/").rstrip("/")
         success_url = f"{base_url}/dashboard/payments/success"
@@ -244,10 +246,10 @@ class FundMilestoneView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        checkout_id = str(checkout.get("id", "")).strip()
         checkout_url = checkout.get("checkout_url", "")
+        checkout_id = str(checkout.get("id", "")).strip()
 
-        pending_tx_defaults = {
+        tx_defaults = {
             "wallet": wallet,
             "initiated_by": request.user,
             "transaction_type": WalletTransaction.Type.DEPOSIT,
@@ -271,7 +273,7 @@ class FundMilestoneView(APIView):
 
         tx, created = WalletTransaction.objects.get_or_create(
             idempotency_key=idempotency_key,
-            defaults=pending_tx_defaults,
+            defaults=tx_defaults,
         )
 
         if not created:

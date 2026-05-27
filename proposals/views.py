@@ -82,38 +82,47 @@ class JobProposalsView(generics.ListAPIView):
 class AcceptProposalView(APIView):
     """
     POST /api/proposals/<proposal_id>/accept/
-    Client accepts an proposal → creates Contract + Milestone.
+    Client accepts a proposal → creates Contract + Milestone.
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request, proposal_id):
-        account = getattr(request.user, 'account', None)
-        client  = getattr(account, 'client_profile', None)
+        account = getattr(request.user, "account", None)
+        client = getattr(account, "client_profile", None)
         if not client:
-            return Response({'detail': 'Client profile required.'}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                {"detail": "Client profile required."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         try:
-            proposal = Proposal.objects.select_related('job', 'freelancer').get(
+            proposal = Proposal.objects.select_related("job", "freelancer").get(
                 pk=proposal_id,
                 job__client=client,
                 status=Proposal.Status.PENDING,
             )
         except Proposal.DoesNotExist:
-            return Response({'detail': 'Proposal not found.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"detail": "Proposal not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
-        if hasattr(proposal.job, 'contract'):
-            return Response({'detail': 'This job already has a contract.'}, status=status.HTTP_400_BAD_REQUEST)
+        if hasattr(proposal.job, "contract"):
+            return Response(
+                {"detail": "This job already has a contract."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        # Accept this proposal, reject all others on the same job
         proposal.status = Proposal.Status.ACCEPTED
-        proposal.save(update_fields=['status'])
-        Proposal.objects.filter(job=proposal.job).exclude(pk=proposal.pk).update(status=Proposal.Status.REJECTED)
+        proposal.save(update_fields=["status"])
 
-        # Mark job as in progress
+        Proposal.objects.filter(job=proposal.job).exclude(pk=proposal.pk).update(
+            status=Proposal.Status.REJECTED
+        )
+
         proposal.job.status = Job.Status.IN_PROGRESS
-        proposal.job.save(update_fields=['status'])
+        proposal.job.save(update_fields=["status"])
 
-        # Create contract
         contract = Contract.objects.create(
             job=proposal.job,
             proposal=proposal,
@@ -121,21 +130,25 @@ class AcceptProposalView(APIView):
             freelancer=proposal.freelancer,
             agreed_price=proposal.proposed_price,
             deadline=proposal.job.deadline or timezone.now().date(),
+            status=Contract.Status.PENDING_FUNDING,
         )
 
-        # Create single milestone (full amount)
         Milestone.objects.create(
             contract=contract,
-            title='Full project delivery',
+            title="Full project delivery",
             amount=proposal.proposed_price,
             due_date=contract.deadline,
             order=1,
+            status=Milestone.Status.PENDING,
         )
 
-        return Response({
-            'detail': 'Proposal accepted. Contract created.',
-            'contract_id': contract.pk,
-        }, status=status.HTTP_201_CREATED)
+        return Response(
+            {
+                "detail": "Proposal accepted. Contract created.",
+                "contract_id": contract.pk,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class WithdrawProposalView(APIView):

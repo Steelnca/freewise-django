@@ -8,7 +8,10 @@ can create consistent messages without duplicating title/message/link logic.
 
 from django.utils.translation import gettext_lazy as _
 
+from django.db import transaction
+
 from .models import Notification
+from .pubsub import NotificationHub, serialize_notification
 
 
 def create_notification(
@@ -20,20 +23,27 @@ def create_notification(
     link: str = "",
 ):
     """
-    Create a single notification for one account.
-
-    Returns None when the account is missing so callers can stay simple.
+    Create one notification and publish it to live subscribers after commit.
     """
     if account is None:
         return None
 
-    return Notification.objects.create(
+    notification = Notification.objects.create(
         account=account,
         type=notification_type,
         title=title,
         message=message,
         link=link,
     )
+
+    transaction.on_commit(
+        lambda: NotificationHub.publish(
+            account.id,
+            serialize_notification(notification),
+        )
+    )
+
+    return notification
 
 
 def notify_contract_parties(

@@ -2,6 +2,9 @@ from rest_framework import status, generics, filters
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.exceptions import PermissionDenied
+
+from django.utils.translation import gettext_lazy as _
 
 from .models import Job, Category, Tag
 from .serializers import JobSerializer, JobCreateSerializer, CategorySerializer, TagSerializer
@@ -12,7 +15,10 @@ class IsClientPermission(IsAuthenticated):
         if not super().has_permission(request, view):
             return False
         account = getattr(request.user, 'account', None)
-        return account and account.is_client
+        # require both client role flag and an actual client_profile
+        if not account or not account.is_client:
+            return False
+        return getattr(account, 'client_profile', None) is not None
 
 
 class JobListView(generics.ListAPIView):
@@ -42,21 +48,25 @@ class JobListView(generics.ListAPIView):
         return qs
 
 
-class JobCreateView(APIView):
+class JobCreateView(generics.CreateAPIView):
     """
     POST /api/jobs/  → create a job (clients only)
+    Requires an active client profile — otherwise returns 403 with a clear message.
     """
     permission_classes = [IsClientPermission]
+    serializer_class   = JobCreateSerializer
 
-    def post(self, request):
-        client_profile = getattr(request.user.account, 'client_profile', None)
+    def get_client_profile(self, request):
+        # safer attribute access
+        account = getattr(request.user, 'account', None)
+        return getattr(account, 'client_profile', None)
+
+    def perform_create(self, serializer):
+        client_profile = self.get_client_profile(self.request)
         if not client_profile:
-            return Response({'detail': 'Client profile not found.'}, status=status.HTTP_404_NOT_FOUND)
-
-        serializer = JobCreateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        job = serializer.save(client=client_profile)
-        return Response(JobSerializer(job).data, status=status.HTTP_201_CREATED)
+            # explicit 403 with clear message about needing an active client profile
+            raise PermissionDenied(detail=_('You must have an active client profile to create a job.'))
+        serializer.save(client=client_profile)
 
 
 class JobDetailView(generics.RetrieveAPIView):

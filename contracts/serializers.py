@@ -55,6 +55,7 @@ class ContractSerializer(serializers.ModelSerializer):
             "source_type",
             "source_type_label",
             "job",
+            "job_title",
             "proposal",
             "title",
             "source_label",
