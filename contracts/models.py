@@ -23,21 +23,21 @@ class Contract(models.Model):
     """
 
     class SourceType(models.TextChoices):
-        JOB_BOARD = "job_board", _("Job board")
-        SERVICE_ORDER = "service_order", _("Service order")
+        JOB_BOARD = "JOB_BOARD", _("Job board")
+        SERVICE_ORDER = "SERVICE_ORDER", _("Service order")
 
     class Status(models.TextChoices):
-        DRAFT = "draft", _("Draft")
-        PENDING_FUNDING = "pending_funding", _("Pending funding")
-        FUNDED = "funded", _("Funded")
-        ACTIVE = "active", _("Active")
-        SUBMITTED = "submitted", _("Submitted")
-        REVISION_REQUESTED = "revision_requested", _("Revision requested")
-        APPROVED = "approved", _("Approved")
-        DISPUTED = "disputed", _("Disputed")
-        RELEASED = "released", _("Released")
-        CANCELLED = "cancelled", _("Cancelled")
-        REFUNDED = "refunded", _("Refunded")
+        DRAFT = "DRAFT", _("Draft")
+        PENDING_FUNDING = "PENDING_FUNDING", _("Pending funding")
+        FUNDED = "FUNDED", _("Funded")
+        ACTIVE = "ACTIVE", _("Active")
+        SUBMITTED = "SUBMITTED", _("Submitted")
+        REVISION_REQUESTED = "REVISION_REQUESTED", _("Revision requested")
+        APPROVED = "APPROVED", _("Approved")
+        DISPUTED = "DISPUTED", _("Disputed")
+        RELEASED = "RELEASED", _("Released")
+        CANCELLED = "CANCELLED", _("Cancelled")
+        REFUNDED = "REFUNDED", _("Refunded")
 
     # --- Source of the contract ---
     source_type = models.CharField(
@@ -257,15 +257,15 @@ class Milestone(models.Model):
     """
 
     class Status(models.TextChoices):
-        PENDING = "pending", _("Pending")
-        FUNDED = "funded", _("Funded")
-        SUBMITTED = "submitted", _("Submitted")
-        REVISION_REQUESTED = "revision_requested", _("Revision requested")
-        APPROVED = "approved", _("Approved")
-        DISPUTED = "disputed", _("Disputed")
-        RELEASED = "released", _("Released")
-        REFUNDED = "refunded", _("Refunded")
-        CANCELLED = "cancelled", _("Cancelled")
+        PENDING = "PENDING", _("Pending")
+        FUNDED = "FUNDED", _("Funded")
+        SUBMITTED = "SUBMITTED", _("Submitted")
+        REVISION_REQUESTED = "REVISION_REQUESTED", _("Revision requested")
+        APPROVED = "APPROVED", _("Approved")
+        DISPUTED = "DISPUTED", _("Disputed")
+        RELEASED = "RELEASED", _("Released")
+        REFUNDED = "REFUNDED", _("Refunded")
+        CANCELLED = "CANCELLED", _("Cancelled")
 
     contract = models.ForeignKey(
         Contract,

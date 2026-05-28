@@ -14,6 +14,8 @@ import os
 
 from config.env import env, BASE_DIR # type: ignore
 
+from corsheaders.defaults import default_headers
+
 env.read_env(os.path.join(BASE_DIR, '.env'))
 
 
@@ -52,17 +54,17 @@ INSTALLED_APPS = [
 
     'phonenumber_field',
 
+    'corsheaders',
+    'rest_framework',
+    'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
+
     # Freewise apps
     'pages',
     'users', 'accounts', 'freelancers', 'clients',
     'jobs', 'proposals', 'services', 'collabs',
     'notifications',
     'payments', 'contracts', 'reviews',
-
-    'rest_framework',
-    'rest_framework_simplejwt',
-    'rest_framework_simplejwt.token_blacklist',
-    'corsheaders',
 ]
 
 MIDDLEWARE = [
@@ -84,7 +86,7 @@ ROOT_URLCONF = 'config.urls'
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
-FRONTEND_URL = "http://localhost:3000"
+FREEWISE_FRONTEND_URL = env("FREEWISE_FRONTEND_URL", default="http://localhost:3000")
 
 AUTH_USER_MODEL = "users.user"
 ACCOUNT_MODEL = "accounts.account"
@@ -287,7 +289,21 @@ SIMPLE_JWT = {
 
 # CORS
 CORS_ALLOWED_ORIGINS = [
-    'http://localhost:3000',
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
 ]
-CORS_ALLOW_CREDENTIALS = True
 
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://.*\.ngrok-free\.app$",
+]
+
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_ALL_ORIGINS = False
+
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "authorization",
+]
+
+# Chargily API keys
+CHARGILY_PUBLIC_KEY = env('CHARGILY_PUBLIC_KEY')
+CHARGILY_SECRET_KEY = env('CHARGILY_SECRET_KEY')

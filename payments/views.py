@@ -17,15 +17,16 @@ from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.translation import gettext_lazy as _
+from django.conf import settings
 
 from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from contracts.models import Milestone
+from contracts.models import Contract, Milestone
 
-from . import chargily
+from .chargily import create_checkout, verify_webhook_signature
 from .models import Wallet, WalletTransaction, EscrowHold, Payout, WebhookLog
 from .serializers import (
     WalletSerializer,
@@ -165,17 +166,18 @@ class RequestPayoutView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
+
 class FundMilestoneView(APIView):
     """
     POST /api/payments/fund/<milestone_id>/
 
     Creates a Chargily checkout for the milestone and stores a pending
-    local transaction so the webhook can settle it later.
+    local wallet transaction so the webhook can settle it later.
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request, milestone_id):
-        account = get_user_account(request.user)
+        account = getattr(request.user, "account", None)
         client = getattr(account, "client_profile", None)
         if not client:
             return Response(
@@ -184,15 +186,33 @@ class FundMilestoneView(APIView):
             )
 
         try:
-            milestone = Milestone.objects.select_related("contract__client").get(
+            milestone = Milestone.objects.select_related(
+                "contract",
+                "contract__client",
+                "contract__proposal",
+            ).get(
                 pk=milestone_id,
                 contract__client=client,
-                status=Milestone.Status.PENDING,
             )
         except Milestone.DoesNotExist:
             return Response(
-                {"detail": _("Milestone not found or already funded.")},
+                {"detail": _("Milestone not found.")},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if milestone.status != Milestone.Status.PENDING:
+            return Response(
+                {"detail": _("Milestone is not pending funding.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if milestone.contract.status not in {
+            Contract.Status.PENDING_FUNDING,
+            Contract.Status.FUNDED,
+        }:
+            return Response(
+                {"detail": _("Contract is not ready for funding.")},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         wallet = get_or_create_wallet_for_user(
@@ -200,41 +220,47 @@ class FundMilestoneView(APIView):
             currency=milestone.currency or DEFAULT_CURRENCY,
         )
 
-        idempotency_key = f"chargily:checkout:milestone:{milestone.pk}"
-
+        checkout_idempotency_key = f"chargily:checkout:milestone:{milestone.pk}"
         existing_tx = WalletTransaction.objects.filter(
-            idempotency_key=idempotency_key,
-            provider_name="chargily",
-            reference_type="milestone",
-            reference_id=str(milestone.pk),
+            idempotency_key=checkout_idempotency_key
         ).first()
 
-        if existing_tx and isinstance(existing_tx.metadata, dict):
-            checkout_url = existing_tx.metadata.get("checkout_url", "")
-            checkout_id = existing_tx.metadata.get("checkout_id", "")
-            if checkout_url:
-                return Response(
-                    {
-                        "checkout_url": checkout_url,
-                        "checkout_id": checkout_id,
-                        "milestone_id": milestone.pk,
-                        "amount": str(milestone.amount),
-                        "currency": milestone.currency or DEFAULT_CURRENCY,
-                    },
-                    status=status.HTTP_200_OK,
-                )
+        if existing_tx and (existing_tx.metadata or {}).get("checkout_url"):
+            return Response(
+                {
+                    "checkout_url": existing_tx.metadata["checkout_url"],
+                    "checkout_id": (existing_tx.metadata or {}).get("checkout_id", ""),
+                    "milestone_id": milestone.pk,
+                    "amount": str(milestone.amount),
+                    "currency": milestone.currency or DEFAULT_CURRENCY,
+                },
+                status=status.HTTP_200_OK,
+            )
 
-        base_url = request.build_absolute_uri("/").rstrip("/")
-        success_url = f"{base_url}/dashboard/payments/success"
-        failure_url = f"{base_url}/dashboard/payments/failure"
-        webhook_url = request.build_absolute_uri("/api/payments/webhooks/chargily/")
+        frontend_base = getattr(settings, "FREEWISE_FRONTEND_URL", "http://localhost:3000").rstrip("/")
+        success_url = f"{frontend_base}/dashboard/payments/success"
+        failure_url = f"{frontend_base}/dashboard/payments/failure"
+        webhook_url = self.request.build_absolute_uri("/api/payments/webhooks/chargily/")
+
+        description = (
+            f"Freewise — {milestone.title} "
+            f"(Contract #{milestone.contract.pk})"
+        )
+
+        metadata = {
+            "milestone_id": milestone.pk,
+            "contract_id": milestone.contract.pk,
+        }
 
         try:
-            checkout = chargily.create_checkout(
-                milestone,
-                success_url,
-                failure_url,
-                webhook_url,
+            checkout = create_checkout(
+                amount=milestone.amount,
+                description=description,
+                success_url=success_url,
+                failure_url=failure_url,
+                webhook_url=webhook_url,
+                metadata=metadata,
+                currency=milestone.currency or DEFAULT_CURRENCY,
             )
         except Exception:
             logger.exception(
@@ -246,58 +272,67 @@ class FundMilestoneView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        checkout_url = checkout.get("checkout_url", "")
         checkout_id = str(checkout.get("id", "")).strip()
+        checkout_url = (
+            checkout.get("checkout_url")
+            or checkout.get("url")
+            or checkout.get("payment_url")
+            or ""
+        )
 
-        tx_defaults = {
-            "wallet": wallet,
-            "initiated_by": request.user,
-            "transaction_type": WalletTransaction.Type.DEPOSIT,
-            "status": WalletTransaction.Status.PENDING,
-            "amount": milestone.amount,
-            "currency": milestone.currency or DEFAULT_CURRENCY,
-            "balance_before": wallet.available_balance,
-            "balance_after": wallet.available_balance,
-            "reference_type": "milestone",
-            "reference_id": str(milestone.pk),
-            "provider_name": "chargily",
-            "provider_reference": checkout_id,
-            "description": _("Milestone checkout created."),
-            "metadata": {
-                "checkout_id": checkout_id,
-                "checkout_url": checkout_url,
-                "milestone_id": milestone.pk,
-                "contract_id": milestone.contract_id,
+        if not checkout_url:
+            return Response(
+                {"detail": _("Checkout URL was not returned by Chargily.")},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        pending_tx, created = WalletTransaction.objects.get_or_create(
+            idempotency_key=checkout_idempotency_key,
+            defaults={
+                "wallet": wallet,
+                "initiated_by": request.user,
+                "transaction_type": WalletTransaction.Type.DEPOSIT,
+                "status": WalletTransaction.Status.PENDING,
+                "amount": milestone.amount,
+                "currency": milestone.currency or DEFAULT_CURRENCY,
+                "balance_before": wallet.available_balance,
+                "balance_after": wallet.available_balance,
+                "reference_type": "milestone",
+                "reference_id": str(milestone.pk),
+                "provider_name": "chargily",
+                "provider_reference": checkout_id or checkout_idempotency_key,
+                "description": _("Milestone checkout created."),
+                "metadata": {
+                    "checkout_id": checkout_id,
+                    "checkout_url": checkout_url,
+                    "milestone_id": milestone.pk,
+                    "contract_id": milestone.contract.pk,
+                },
             },
-        }
-
-        tx, created = WalletTransaction.objects.get_or_create(
-            idempotency_key=idempotency_key,
-            defaults=tx_defaults,
         )
 
         if not created:
-            tx.wallet = wallet
-            tx.initiated_by = request.user
-            tx.transaction_type = WalletTransaction.Type.DEPOSIT
-            tx.status = WalletTransaction.Status.PENDING
-            tx.amount = milestone.amount
-            tx.currency = milestone.currency or DEFAULT_CURRENCY
-            tx.balance_before = wallet.available_balance
-            tx.balance_after = wallet.available_balance
-            tx.reference_type = "milestone"
-            tx.reference_id = str(milestone.pk)
-            tx.provider_name = "chargily"
-            tx.provider_reference = checkout_id
-            tx.description = _("Milestone checkout created.")
-            tx.metadata = {
+            pending_tx.wallet = wallet
+            pending_tx.initiated_by = request.user
+            pending_tx.transaction_type = WalletTransaction.Type.DEPOSIT
+            pending_tx.status = WalletTransaction.Status.PENDING
+            pending_tx.amount = milestone.amount
+            pending_tx.currency = milestone.currency or DEFAULT_CURRENCY
+            pending_tx.balance_before = wallet.available_balance
+            pending_tx.balance_after = wallet.available_balance
+            pending_tx.reference_type = "milestone"
+            pending_tx.reference_id = str(milestone.pk)
+            pending_tx.provider_name = "chargily"
+            pending_tx.provider_reference = checkout_id or checkout_idempotency_key
+            pending_tx.description = _("Milestone checkout created.")
+            pending_tx.metadata = {
                 "checkout_id": checkout_id,
                 "checkout_url": checkout_url,
                 "milestone_id": milestone.pk,
-                "contract_id": milestone.contract_id,
+                "contract_id": milestone.contract.pk,
             }
-            tx.full_clean()
-            tx.save(
+            pending_tx.full_clean()
+            pending_tx.save(
                 update_fields=[
                     "wallet",
                     "initiated_by",
@@ -338,7 +373,7 @@ class ChargilyWebhookView(APIView):
     def post(self, request):
         raw_body = request.body
         signature = request.headers.get("signature", "")
-        signature_valid = chargily.verify_webhook_signature(raw_body, signature)
+        signature_valid = verify_webhook_signature(raw_body, signature)
 
         try:
             payload = json.loads(raw_body.decode("utf-8"))

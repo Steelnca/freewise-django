@@ -1,6 +1,5 @@
 import logging
 
-from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -28,8 +27,8 @@ from urllib.parse import unquote
 from django.utils.translation import gettext as _
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
-
-
+from django.contrib.auth import get_user_model
+from django.conf import settings
 
 
 logger = logging.getLogger(__name__)
@@ -493,3 +492,27 @@ class AuthenticatedForgotPasswordView(APIView):
             {"detail": _("Password reset link sent to your email.")},
             status=status.HTTP_200_OK,
         )
+
+# temporary debug endpoint to inspect CORS behavior at runtime. Remove before production.
+class CorsDebugView(APIView):
+    """
+    Temporary endpoint to inspect runtime CORS/settings behavior.
+    REMOVE before production.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response({
+            "origin": request.headers.get("Origin"),
+            "host": request.get_host(),
+            "scheme": request.scheme,
+
+            "cors_allow_all_origins": settings.CORS_ALLOW_ALL_ORIGINS,
+            "cors_allowed_origins": settings.CORS_ALLOWED_ORIGINS,
+            "cors_allowed_origin_regexes": settings.CORS_ALLOWED_ORIGIN_REGEXES,
+
+            "allowed_hosts": settings.ALLOWED_HOSTS,
+
+            "debug": settings.DEBUG,
+        })

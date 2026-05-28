@@ -133,7 +133,7 @@ class AcceptProposalView(APIView):
             status=Contract.Status.PENDING_FUNDING,
         )
 
-        Milestone.objects.create(
+        milestone = Milestone.objects.create(
             contract=contract,
             title="Full project delivery",
             amount=proposal.proposed_price,
@@ -146,6 +146,7 @@ class AcceptProposalView(APIView):
             {
                 "detail": "Proposal accepted. Contract created.",
                 "contract_id": contract.pk,
+                "milestone_id": milestone.pk,
             },
             status=status.HTTP_201_CREATED,
         )
