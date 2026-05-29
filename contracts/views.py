@@ -13,7 +13,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import Contract, Milestone
-from .serializers import ContractSerializer, MilestoneActionSerializer, MilestoneSerializer
+from .serializers import ContractSerializer, MilestoneActionSerializer, MilestoneSerializer, MilestoneCreateSerializer
 from .services import (
     approve_milestone,
     cancel_contract,
@@ -22,6 +22,7 @@ from .services import (
     open_dispute,
     request_revision,
     submit_milestone,
+    create_milestone,
 )
 
 
@@ -187,3 +188,25 @@ class CancelContractView(APIView):
             )
 
         return Response(ContractSerializer(updated).data, status=status.HTTP_200_OK)
+
+
+class CreateMilestoneView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        contract = get_object_or_404(Contract, pk=pk)
+        ensure_party_access(contract, request.user)
+
+        serializer = MilestoneCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            milestone = create_milestone(
+                contract=contract,
+                user=request.user,
+                **serializer.validated_data,
+            )
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(MilestoneSerializer(milestone).data, status=status.HTTP_201_CREATED)

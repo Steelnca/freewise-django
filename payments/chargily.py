@@ -42,8 +42,14 @@ def _to_decimal(value: Decimal | str | int | float) -> Decimal:
     return Decimal(str(value)).quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
 
 
-def _to_minor_units(amount: Decimal | str | int | float) -> int:
-    return int(_to_decimal(amount) * 100)
+def _to_checkout_amount(amount: Decimal | str | int | float) -> int:
+    """
+    Chargily expects an integer checkout amount.
+    Keep the Freewise amount as the source of truth and do not scale twice.
+    """
+    return int(
+        Decimal(str(amount)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
 
 
 def build_checkout_payload(
@@ -57,7 +63,7 @@ def build_checkout_payload(
     currency: str = DEFAULT_CURRENCY,
 ) -> dict[str, Any]:
     return {
-        "amount": _to_minor_units(amount),
+        "amount": _to_checkout_amount(amount),
         "currency": currency.lower().strip(),
         "success_url": success_url,
         "failure_url": failure_url,

@@ -11,6 +11,7 @@ This layer is intentionally thin:
 
 import json
 import logging
+from typing import Any
 
 from django.db import transaction
 from django.utils import timezone
@@ -37,12 +38,11 @@ from .serializers import (
 )
 from .services import (
     get_or_create_wallet_for_user,
-    record_deposit,
-    hold_funds_for_escrow,
     request_payout,
 )
 from .constants import DEFAULT_CURRENCY
 from .webhooks import PaymentWebhookError, reconcile_chargily_webhook_log
+from .utils import find_first_key_recursive
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +176,11 @@ class FundMilestoneView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+    def get_webhook_url(self, request):
+        if settings.DEBUG:
+            return f"https://cute-deeply-opossum.ngrok-free.app/api/payments/webhooks/chargily/"
+        return request.build_absolute_uri("/api/payments/webhooks/chargily/")
+
     def post(self, request, milestone_id):
         account = getattr(request.user, "account", None)
         client = getattr(account, "client_profile", None)
@@ -240,7 +245,7 @@ class FundMilestoneView(APIView):
         frontend_base = getattr(settings, "FREEWISE_FRONTEND_URL", "http://localhost:3000").rstrip("/")
         success_url = f"{frontend_base}/dashboard/payments/success"
         failure_url = f"{frontend_base}/dashboard/payments/failure"
-        webhook_url = self.request.build_absolute_uri("/api/payments/webhooks/chargily/")
+        webhook_url = self.get_webhook_url(request)
 
         description = (
             f"Freewise — {milestone.title} "
@@ -370,6 +375,13 @@ class ChargilyWebhookView(APIView):
     """
     permission_classes = [AllowAny]
 
+    def extract_event_name(self, payload: dict[str, Any]) -> str:
+        for source in (payload.get("data"), payload):
+            found = find_first_key_recursive(source, ("status", "event", "type"))
+            if found:
+                return found
+        return "unknown"
+
     def post(self, request):
         raw_body = request.body
         signature = request.headers.get("signature", "")
@@ -377,6 +389,7 @@ class ChargilyWebhookView(APIView):
 
         try:
             payload = json.loads(raw_body.decode("utf-8"))
+            print(f"Received Chargily webhook with payload: {payload}")
         except json.JSONDecodeError:
             return Response(
                 {"detail": _("Invalid JSON.")},
@@ -386,7 +399,7 @@ class ChargilyWebhookView(APIView):
         provider_event_id = str(
             payload.get("invoice_id") or payload.get("payment_id") or payload.get("id") or ""
         ).strip()
-        event_name = str(payload.get("status") or payload.get("event") or "unknown").strip()
+        event_name = self.extract_event_name(payload=payload)
 
         if not provider_event_id:
             return Response(
@@ -394,7 +407,7 @@ class ChargilyWebhookView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        webhook_log, _ = WebhookLog.objects.get_or_create(
+        webhook_log, webhook_created = WebhookLog.objects.get_or_create(
             provider_name="chargily",
             provider_event_id=provider_event_id,
             defaults={

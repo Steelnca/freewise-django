@@ -46,7 +46,7 @@ def extract_chargily_reference(payload: dict, fallback: str = "") -> str:
     so we check the common candidates in order.
     """
     return _first_existing_key(
-        payload,
+        payload.get("data") or payload,
         ("invoice_id", "payment_id", "id"),
     ) or str(fallback or "").strip()
 

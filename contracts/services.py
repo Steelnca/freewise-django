@@ -13,6 +13,8 @@ Rules:
 from __future__ import annotations
 
 from typing import Optional
+from decimal import Decimal
+
 
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
@@ -143,6 +145,10 @@ def _maybe_finish_contract(contract: Contract) -> Contract:
             timestamp_field="completed_at",
         )
     return contract
+
+def _milestones_total(contract):
+    return sum((m.amount for m in contract.milestones.all()), Decimal("0.00"))
+
 
 
 @transaction.atomic
@@ -491,3 +497,35 @@ def cancel_contract(*, contract: Contract, user, reason: str = "") -> Contract:
     contract.full_clean()
     contract.save()
     return contract
+
+
+@transaction.atomic
+def create_milestone(*, contract, user, title, description, amount, due_date, order):
+    ensure_party_access(contract, user)
+
+    account = getattr(user, "account", None)
+    client = getattr(account, "client_profile", None)
+    if not client or contract.client_id != client.id:
+        raise PermissionDenied("Only the client can create milestones.")
+
+    contract = Contract.objects.select_for_update().get(pk=contract.pk)
+
+    if contract.status != Contract.Status.PENDING_FUNDING:
+        raise ValidationError({"detail": "Milestones can only be edited before funding starts."})
+
+    amount = Decimal(str(amount))
+
+    current_total = _milestones_total(contract)
+    if current_total + amount > contract.agreed_price:
+        raise ValidationError({"amount": "Milestones cannot exceed the agreed contract price."})
+
+    milestone = Milestone.objects.create(
+        contract=contract,
+        title=title,
+        description=description,
+        amount=amount,
+        due_date=due_date,
+        order=order,
+        status=Milestone.Status.PENDING,
+    )
+    return milestone

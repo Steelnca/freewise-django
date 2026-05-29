@@ -366,6 +366,8 @@ def hold_funds_for_escrow(
     initiated_by: Optional[User] = None,
     reference_type: str = "contract",
     reference_id: str = "",
+    provider_name: str = "",
+    provider_reference: str = "",
     description: str = "",
     metadata: Optional[Dict[str, Any]] = None,
 ) -> EscrowHold:
@@ -411,6 +413,8 @@ def hold_funds_for_escrow(
         currency=wallet_currency,
         balance_before=before_available,
         balance_after=wallet.available_balance,
+        provider_name=provider_name,
+        provider_reference=provider_reference,
         idempotency_key=idempotency_key,
         status=WalletTransaction.Status.COMPLETED,
         reference_type=reference_type,
@@ -441,8 +445,13 @@ def hold_funds_for_escrow(
         amount=amount,
         currency=wallet_currency,
         status=EscrowHold.Status.ACTIVE,
-        metadata=metadata or {},
+        metadata=build_metadata(
+            metadata,
+            provider_name=provider_name,
+            provider_reference=provider_reference,
+        ),
     )
+
     hold.full_clean()
     hold.save()
 

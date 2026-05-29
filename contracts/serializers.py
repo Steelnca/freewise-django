@@ -94,3 +94,10 @@ class MilestoneActionSerializer(serializers.Serializer):
         decimal_places=2,
         default=0,
     )
+
+class MilestoneCreateSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=255)
+    description = serializers.CharField(required=False, allow_blank=True, default="")
+    amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=0.01)
+    due_date = serializers.DateField()
+    order = serializers.IntegerField(min_value=1)
