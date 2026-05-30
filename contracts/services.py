@@ -221,6 +221,7 @@ def submit_milestone(
     milestone: Milestone,
     user,
     submission_note: str = "",
+    submission_link: str = "",
 ) -> Milestone:
     """
     Freelancer submits work for review.
@@ -245,6 +246,7 @@ def submit_milestone(
         )
 
     milestone.status = Milestone.Status.SUBMITTED
+    milestone.submission_link = submission_link or milestone.submission_link
     milestone.submission_note = submission_note or milestone.submission_note
     milestone.submitted_at = timezone.now()
     milestone.full_clean()

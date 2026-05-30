@@ -374,6 +374,13 @@ class Milestone(models.Model):
         help_text=_("When this milestone entered dispute."),
     )
 
+    submission_link = models.URLField(
+        blank=True,
+        default="",
+        verbose_name=_("submission link"),
+        help_text=_("Optional link to the delivered work, preview, or files."),
+    )
+
     created_at = models.DateTimeField(
         auto_now_add=True,
         verbose_name=_("created at"),

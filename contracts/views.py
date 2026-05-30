@@ -69,6 +69,7 @@ class SubmitMilestoneView(APIView):
                 milestone=milestone,
                 user=request.user,
                 submission_note=serializer.validated_data.get("note", ""),
+                submission_link=serializer.validated_data.get("submission_link", ""),
             )
         except Exception as exc:
             return Response(
