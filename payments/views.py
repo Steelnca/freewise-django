@@ -205,18 +205,31 @@ class FundMilestoneView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        if milestone.status != Milestone.Status.PENDING:
-            return Response(
-                {"detail": _("Milestone is not pending funding.")},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         if milestone.contract.status not in {
             Contract.Status.PENDING_FUNDING,
-            Contract.Status.FUNDED,
+            Contract.Status.IN_PROGRESS,
         }:
             return Response(
                 {"detail": _("Contract is not ready for funding.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        first_pending_milestone = (
+            milestone.contract.milestones
+            .filter(status=Milestone.Status.PENDING)
+            .order_by("order", "created_at")
+            .first()
+        )
+
+        if not first_pending_milestone:
+            return Response(
+                {"detail": _("No pending milestone is available for funding.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if first_pending_milestone.pk != milestone.pk:
+            return Response(
+                {"detail": _("Fund the first pending milestone in order.")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 

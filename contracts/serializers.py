@@ -8,7 +8,7 @@ All state changes happen in contracts/services.py.
 from rest_framework import serializers
 from decimal import Decimal
 
-from .models import Contract, Milestone
+from .models import Contract, Milestone, ContractEvent
 
 
 class MilestoneSerializer(serializers.ModelSerializer):
@@ -33,8 +33,12 @@ class MilestoneSerializer(serializers.ModelSerializer):
             "submitted_at",
             "approved_at",
             "released_at",
+            "funded_at",
             "refunded_at",
             "disputed_at",
+            "revision_scope",
+            "revision_requested_at",
+            "review_due_at",
             "created_at",
             "updated_at",
         )
@@ -59,9 +63,11 @@ class ContractSerializer(serializers.ModelSerializer):
     funding_progress = serializers.SerializerMethodField()
     first_pending_milestone_id = serializers.SerializerMethodField()
     first_funded_milestone_id = serializers.SerializerMethodField()
-    has_dispute = serializers.SerializerMethodField()
+    has_suspension = serializers.SerializerMethodField()
     is_funding_locked = serializers.SerializerMethodField()
     is_finished = serializers.SerializerMethodField()
+    next_action = serializers.SerializerMethodField()
+    next_action_milestone_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Contract
@@ -91,17 +97,16 @@ class ContractSerializer(serializers.ModelSerializer):
             "funding_progress",
             "first_pending_milestone_id",
             "first_funded_milestone_id",
-            "has_dispute",
+            "has_suspension",
             "is_funding_locked",
             "is_finished",
-            "funded_at",
+            "next_action",
+            "next_action_milestone_id",
             "active_at",
-            "submitted_at",
             "completed_at",
             "cancelled_at",
-            "disputed_at",
-            "released_at",
-            "refunded_at",
+            "suspended_at",
+            "withdrawn_at",
             "created_at",
             "updated_at",
         )
@@ -121,10 +126,8 @@ class ContractSerializer(serializers.ModelSerializer):
 
         if client_profile and obj.client_id == client_profile.id:
             return "client"
-
         if freelancer_profile and obj.freelancer_id == freelancer_profile.id:
             return "freelancer"
-
         return None
 
     def get_viewer_role(self, obj):
@@ -143,21 +146,31 @@ class ContractSerializer(serializers.ModelSerializer):
         return obj.agreed_price - self.get_milestone_total(obj)
 
     def get_funding_progress(self, obj):
-        total = self.get_milestone_total(obj)
-        if not obj.agreed_price:
-            return 0
-        return int((total / obj.agreed_price) * 100)
+        total = obj.funded_balance + obj.released_amount
+        if obj.agreed_price > 0:
+            return (total / obj.agreed_price) * 100
+        return 0
 
     def get_first_pending_milestone_id(self, obj):
-        milestone = obj.milestones.filter(status=Milestone.Status.PENDING).order_by("order", "created_at").first()
+        milestone = (
+            obj.milestones
+            .filter(status=Milestone.Status.PENDING)
+            .order_by("order", "created_at")
+            .first()
+        )
         return milestone.id if milestone else None
 
     def get_first_funded_milestone_id(self, obj):
-        milestone = obj.milestones.filter(status=Milestone.Status.FUNDED).order_by("order", "created_at").first()
+        milestone = (
+            obj.milestones
+            .filter(status=Milestone.Status.FUNDED)
+            .order_by("order", "created_at")
+            .first()
+        )
         return milestone.id if milestone else None
 
-    def get_has_dispute(self, obj):
-        if obj.status == Contract.Status.DISPUTED:
+    def get_has_suspension(self, obj):
+        if obj.status == Contract.Status.SUSPENDED:
             return True
         return obj.milestones.filter(status=Milestone.Status.DISPUTED).exists()
 
@@ -165,22 +178,115 @@ class ContractSerializer(serializers.ModelSerializer):
         return obj.status != Contract.Status.PENDING_FUNDING
 
     def get_is_finished(self, obj):
-        return obj.status in {Contract.Status.RELEASED, Contract.Status.REFUNDED}
+        return obj.status in {
+            Contract.Status.COMPLETED,
+            Contract.Status.WITHDRAWN,
+            Contract.Status.CANCELLED,
+        }
+
+    def get_next_action(self, obj):
+        role = self._viewer_role(obj)
+
+        if self.get_has_suspension(obj):
+            return "under_suspension"
+
+        if self.get_is_finished(obj):
+            return "completed"
+
+        first_pending = (
+            obj.milestones.filter(status=Milestone.Status.PENDING)
+            .order_by("order", "created_at")
+            .first()
+        )
+        first_funded = (
+            obj.milestones.filter(status=Milestone.Status.FUNDED)
+            .order_by("order", "created_at")
+            .first()
+        )
+        first_submitted = (
+            obj.milestones.filter(status=Milestone.Status.SUBMITTED)
+            .order_by("order", "created_at")
+            .first()
+        )
+        first_revision_requested = (
+            obj.milestones.filter(status=Milestone.Status.REVISION_REQUESTED)
+            .order_by("order", "created_at")
+            .first()
+        )
+
+        if role == "client":
+            if obj.status == Contract.Status.PENDING_FUNDING:
+                if first_pending:
+                    return "split_or_edit_milestones_then_fund"
+                return "create_milestone_then_fund"
+
+            if first_revision_requested:
+                return "review_revision_request"
+
+            if first_submitted:
+                return "review_submission"
+
+            return "waiting_for_freelancer"
+
+        if role == "freelancer":
+            if first_revision_requested:
+                return "submit_revision"
+
+            if first_funded:
+                return "submit_funded_milestone"
+
+            return "waiting_for_client_funding"
+
+        return "no_access"
+
+    def get_next_action_milestone_id(self, obj):
+        ordered = obj.milestones.order_by("order", "created_at")
+
+        revision = ordered.filter(status=Milestone.Status.REVISION_REQUESTED).first()
+        if revision:
+            return revision.id
+
+        submitted = ordered.filter(status=Milestone.Status.SUBMITTED).first()
+        if submitted:
+            return submitted.id
+
+        funded = ordered.filter(status=Milestone.Status.FUNDED).first()
+        if funded:
+            return funded.id
+
+        pending = ordered.filter(status=Milestone.Status.PENDING).first()
+        if pending:
+            return pending.id
+
+        return None
 
 class MilestoneActionSerializer(serializers.Serializer):
     note = serializers.CharField(required=False, allow_blank=True, default="")
+    revision_scope = serializers.CharField(required=False, allow_blank=True, default="")
     submission_link = serializers.URLField(required=False, allow_blank=True, default="")
     reason = serializers.CharField(required=False, allow_blank=True, default="")
-    fee_amount = serializers.DecimalField(
-        required=False,
-        max_digits=14,
-        decimal_places=2,
-        default=0,
-    )
+    fee_amount = serializers.DecimalField(required=False, max_digits=14, decimal_places=2, default=0)
 
 class MilestoneCreateSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=255)
     description = serializers.CharField(required=False, allow_blank=True, default="")
-    amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=0.01)
+    amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal("0.01"))
     due_date = serializers.DateField()
     order = serializers.IntegerField(min_value=1)
+
+class ContractEventSerializer(serializers.ModelSerializer):
+    event_type = serializers.CharField(read_only=True)
+    actor_username = serializers.CharField(source="actor.account.user.username", read_only=True)
+    metadata = serializers.JSONField(read_only=True)
+    created_at = serializers.DateTimeField(read_only=True)
+
+    class Meta:
+        model = ContractEvent
+        fields = (
+            "id",
+            "event_type",
+            "actor_username",
+            "metadata",
+            "created_at",
+        )
+        read_only_fields = fields

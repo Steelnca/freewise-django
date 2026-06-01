@@ -12,7 +12,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 import os
 
-from config.env import env, BASE_DIR # type: ignore
+from config.env import env, BASE_DIR
 
 from corsheaders.defaults import default_headers
 
@@ -33,6 +33,13 @@ ALLOWED_HOSTS = ['*']
 USER_AGENT = env('USER_AGENT')
 
 SITE_ID = 1
+
+# Freewise specific settings
+FREEWISE_PLATFORM_FEE_PERCENT = env.int("FREEWISE_PLATFORM_FEE_PERCENT", default=8)
+FREEWISE_REVIEW_GRACE_DAYS = env.int("FREEWISE_REVIEW_GRACE_DAYS", default=7)
+
+FREEWISE_PLATFORM_USERNAME = env("FREEWISE_PLATFORM_USERNAME")
+FREEWISE_PLATFORM_EMAIL = env("FREEWISE_PLATFORM_EMAIL")
 
 # Application definition
 
@@ -307,3 +314,4 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
 # Chargily API keys
 CHARGILY_PUBLIC_KEY = env('CHARGILY_PUBLIC_KEY')
 CHARGILY_SECRET_KEY = env('CHARGILY_SECRET_KEY')
+

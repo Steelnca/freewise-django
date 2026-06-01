@@ -7,6 +7,7 @@ from django.contrib.auth.models import AbstractUser
 from django.utils.translation import gettext_lazy as _
 from django.conf import settings
 from django.utils import timezone
+from django.core.exceptions import ValidationError
 
 from core.mixins import LowercaseFieldsMixin
 
@@ -16,8 +17,14 @@ from .constants import USERNAME_MAX_LENGTH
 # Create your models here.
 
 class User(AbstractUser, LowercaseFieldsMixin):
+
+    class Type(models.TextChoices):
+        REGULAR = 'regular', _('Regular User')
+        PLATFORM = 'platform', _('Platform Account')
+
     username = models.CharField(max_length=USERNAME_MAX_LENGTH, unique=True, validators=[username_regex, username_profanity, username_reserved_terms], db_index=True)
     is_staff = models.BooleanField(default=False)
+    type = models.CharField(max_length=20, choices=Type.choices, default=Type.REGULAR)
 
     token_version = models.PositiveIntegerField(
         default=0,
@@ -28,6 +35,15 @@ class User(AbstractUser, LowercaseFieldsMixin):
         ),
     )
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["type"],
+                condition=models.Q(type='platform'),
+                name="unique_platform_user",
+            ),
+        ]
+
     class ProcessOptions:
         lowercase_fields = ['username']
 
@@ -37,6 +53,34 @@ class User(AbstractUser, LowercaseFieldsMixin):
     def get_user_email(user):
         email = EmailAddress.objects.filter(user=user, primary=True).first()
         return email.email if email else user.email  # Fallback to the email field on the User model
+
+    @classmethod
+    def get_platform_user(cls):
+        try:
+            platform_user, created = cls.objects.get_or_create(
+                username=settings.FREEWISE_PLATFORM_USERNAME,
+                type=cls.UserType.PLATFORM,
+                defaults={
+                    "email": settings.FREEWISE_PLATFORM_EMAIL,
+                    "is_staff": False,
+                    "is_superuser": False,
+                },
+            )
+
+            # Keep it unusable as a login account
+            if created:
+                platform_user.set_unusable_password()
+                platform_user.save(update_fields=["password"])
+            else:
+                # Repair it if someone accidentally gave it a usable password
+                if platform_user.has_usable_password():
+                    platform_user.set_unusable_password()
+                    platform_user.save(update_fields=["password"])
+
+            return platform_user
+
+        except cls.MultipleObjectsReturned:
+            raise ValidationError("Multiple platform users found.")
 
 
 

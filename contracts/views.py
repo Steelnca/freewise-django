@@ -5,7 +5,7 @@ These views do not mutate models directly.
 They delegate all state changes to contracts/services.py.
 """
 
-from django.shortcuts import get_object_or_404
+from django.shortcuts import get_object_or_404, redirect
 from django.utils.translation import gettext_lazy as _
 from rest_framework import generics, status
 from rest_framework.permissions import IsAuthenticated
@@ -13,7 +13,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import Contract, Milestone
-from .serializers import ContractSerializer, MilestoneActionSerializer, MilestoneSerializer, MilestoneCreateSerializer
+from .serializers import ContractSerializer, MilestoneActionSerializer, MilestoneSerializer, MilestoneCreateSerializer, ContractEventSerializer
 from .services import (
     approve_milestone,
     cancel_contract,
@@ -23,6 +23,7 @@ from .services import (
     request_revision,
     submit_milestone,
     create_milestone,
+    ensure_milestone_access,
 )
 
 
@@ -128,7 +129,6 @@ class ApproveMilestoneView(APIView):
                 milestone=milestone,
                 user=request.user,
                 review_note=serializer.validated_data.get("note", ""),
-                fee_amount=serializer.validated_data.get("fee_amount", 0),
             )
         except Exception as exc:
             return Response(
@@ -211,3 +211,32 @@ class CreateMilestoneView(APIView):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(MilestoneSerializer(milestone).data, status=status.HTTP_201_CREATED)
+
+class ContractEventsView(generics.ListAPIView):
+    serializer_class = ContractEventSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        contract = get_object_or_404(Contract, pk=self.kwargs["pk"])
+        ensure_party_access(contract, self.request.user)
+        return contract.events.order_by("-created_at")
+
+
+class MilestoneDeliverableRedirectView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        milestone = get_object_or_404(
+            Milestone.objects.select_related("contract"),
+            pk=pk,
+        )
+
+        ensure_milestone_access(milestone, request.user)
+
+        if not milestone.submission_link:
+            return Response(
+                {"detail": "No deliverable link found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return redirect(milestone.submission_link)

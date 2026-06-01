@@ -16,6 +16,7 @@ that create WalletTransaction rows inside database transactions.
 
 from decimal import Decimal
 
+from django.core.validators import MinValueValidator
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -356,10 +357,11 @@ class EscrowHold(TimeStampedModel):
     )
 
     amount = models.DecimalField(
-        max_digits=MONEY_MAX_DIGITS,
-        decimal_places=MONEY_DECIMAL_PLACES,
+        max_digits=14,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.00"))],
         verbose_name=_("amount"),
-        help_text=_("Amount locked in escrow."),
+        help_text=_("Remaining escrow amount. Zero is valid when the hold is fully resolved."),
     )
 
     currency = models.CharField(
@@ -413,9 +415,9 @@ class EscrowHold(TimeStampedModel):
 
     def clean(self):
         super().clean()
-        if self.amount <= 0:
-            raise ValidationError({"amount": _("Amount must be greater than zero.")})
 
+        if self.amount is not None and self.amount < Decimal("0.00"):
+            raise ValidationError({"amount": _("Amount cannot be negative.")})
 
 class Payout(TimeStampedModel):
     """

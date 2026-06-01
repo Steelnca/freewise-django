@@ -28,6 +28,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
+from django.conf import settings
 
 from .models import (
     EscrowHold,
@@ -286,6 +287,11 @@ def _get_existing_escrow_hold(*, idempotency_key: str):
 def _get_existing_payout(*, idempotency_key: str):
     return Payout.objects.filter(idempotency_key=idempotency_key).first()
 
+def calculate_platform_fee(amount: Decimal | str | int | float) -> Decimal:
+    amount = normalize_money(amount)
+    percent = Decimal(str(getattr(settings, "FREEWISE_PLATFORM_FEE_PERCENT", 10)))
+    return normalize_money(amount * percent / Decimal("100"))
+
 # -----------------------------------------------------------------------------
 # Public services
 # -----------------------------------------------------------------------------
@@ -537,6 +543,10 @@ def refund_escrow_hold(
     )
 
     hold.amount = hold.amount - refund_amount
+
+    if hold.amount < Decimal("0.00"):
+        raise EscrowHoldError(_("Escrow hold amount cannot go below zero."))
+
     if hold.amount == Decimal("0.00"):
         hold.status = EscrowHold.Status.REFUNDED
         hold.resolved_at = timezone.now()
@@ -547,7 +557,7 @@ def refund_escrow_hold(
         hold.resolution_transaction = tx
         hold.resolution_note = description or _("Escrow refunded partially.")
 
-    hold.full_clean()
+    # Zero is a valid terminal amount.
     hold.save(
         update_fields=[
             "amount",
@@ -753,6 +763,10 @@ def release_escrow_hold_to_wallet(
         )
 
     hold.amount = hold.amount - total_outgoing
+
+    if hold.amount < Decimal("0.00"):
+        raise EscrowHoldError(_("Escrow hold amount cannot go below zero."))
+
     if hold.amount == Decimal("0.00"):
         hold.status = EscrowHold.Status.RELEASED
         hold.resolved_at = timezone.now()
@@ -763,7 +777,7 @@ def release_escrow_hold_to_wallet(
         hold.resolution_transaction = source_tx
         hold.resolution_note = description or _("Escrow released partially.")
 
-    hold.full_clean()
+    # Do not full_clean() here because zero is a valid terminal escrow amount.
     hold.save(
         update_fields=[
             "amount",
@@ -874,3 +888,31 @@ def request_payout(
     payout.save()
 
     return payout
+
+@transaction.atomic
+def get_or_create_platform_wallet(currency: str = DEFAULT_CURRENCY) -> Wallet:
+    """
+    Return Freewise's platform wallet.
+
+    Uses the User.get_platform_user() classmethod and keeps the wallet
+    as a normal ledger wallet owned by the platform system account.
+    """
+    currency = validate_currency(currency)
+
+    platform_user = User.get_platform_user()
+
+    wallet, created = Wallet.objects.get_or_create(
+        user=platform_user,
+        defaults={"currency": currency},
+    )
+
+    if not created and wallet.currency != currency:
+        raise ValidationError(
+            {
+                "currency": _(
+                    "Existing platform wallet currency does not match the requested currency."
+                )
+            }
+        )
+
+    return wallet

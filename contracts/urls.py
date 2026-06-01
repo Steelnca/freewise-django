@@ -9,6 +9,7 @@ from .views import (
     ApproveMilestoneView,
     DisputeMilestoneView,
     CancelContractView,
+    MilestoneDeliverableRedirectView,
 )
 
 urlpatterns = [
@@ -20,4 +21,5 @@ urlpatterns = [
     path("milestones/<int:pk>/request-revision/", RequestRevisionView.as_view(), name="milestone-request-revision"),
     path("milestones/<int:pk>/approve/", ApproveMilestoneView.as_view(), name="contract-milestone-approve"),
     path("milestones/<int:pk>/dispute/", DisputeMilestoneView.as_view(), name="contract-milestone-dispute"),
+    path("milestones/<int:pk>/deliverable/", MilestoneDeliverableRedirectView.as_view(), name="contract-milestone-deliverable"),
 ]

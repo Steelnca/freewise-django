@@ -1,4 +1,3 @@
-
 """
 Freewise contract services.
 
@@ -12,9 +11,8 @@ Rules:
 
 from __future__ import annotations
 
-from typing import Optional
 from decimal import Decimal
-
+from typing import Optional
 
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
@@ -22,23 +20,23 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from payments.models import EscrowHold
+from payments.models import EscrowHold, Wallet
 from payments.services import (
     DEFAULT_CURRENCY as PAYMENTS_DEFAULT_CURRENCY,
     EscrowHoldError,
+    calculate_platform_fee,
+    get_or_create_platform_wallet,
     get_or_create_wallet_for_user,
     hold_funds_for_escrow,
     release_escrow_hold_to_wallet,
     refund_escrow_hold,
 )
 
-from .models import Contract, Milestone
-
+from .models import Contract, Milestone, ContractEvent
 
 TERMINAL_MILESTONE_STATUSES = {
     Milestone.Status.RELEASED,
     Milestone.Status.REFUNDED,
-    Milestone.Status.CANCELLED,
 }
 
 
@@ -123,32 +121,39 @@ def _set_contract_state(
     contract.status = status
     if timestamp_field:
         setattr(contract, timestamp_field, timezone.now())
-    if note:
+    if note is not None:
         contract.notes = note
+
     contract.full_clean()
     contract.save()
     return contract
 
 
-def _all_milestones_terminal(contract: Contract) -> bool:
-    return not contract.milestones.exclude(status__in=TERMINAL_MILESTONE_STATUSES).exists()
-
-
-def _maybe_finish_contract(contract: Contract) -> Contract:
-    """
-    Mark the contract as released when all milestones are terminal.
-    """
-    if _all_milestones_terminal(contract):
-        return _set_contract_state(
-            contract,
-            Contract.Status.RELEASED,
-            timestamp_field="completed_at",
-        )
-    return contract
-
 def _milestones_total(contract):
     return sum((m.amount for m in contract.milestones.all()), Decimal("0.00"))
 
+
+def log_contract_event(*, contract: Contract, event_type: str, actor=None, metadata=None) -> None:
+    """
+    Write one immutable contract activity record.
+    """
+    ContractEvent.objects.create(
+        contract=contract,
+        event_type=event_type,
+        actor=actor,
+        metadata=metadata or {},
+    )
+
+
+def _get_milestone_hold(milestone: Milestone):
+    """
+    Look up the escrow hold tied to a milestone contract reference.
+    """
+    return (
+        EscrowHold.objects.select_for_update()
+        .filter(contract_reference=contract_reference_for_milestone(milestone))
+        .first()
+    )
 
 
 @transaction.atomic
@@ -172,15 +177,30 @@ def fund_milestone_from_payment(
     ).get(pk=milestone.pk)
 
     contract = milestone.contract
+
+    if contract.status in {
+        Contract.Status.CANCELLED,
+        Contract.Status.WITHDRAWN,
+        Contract.Status.SUSPENDED,
+        Contract.Status.COMPLETED,
+    }:
+        raise ValidationError({"status": _("This contract is not accepting funding.")})
+
+    first_pending = (
+        contract.milestones.filter(status=Milestone.Status.PENDING)
+        .order_by("order", "created_at")
+        .first()
+    )
+    if first_pending and first_pending.pk != milestone.pk:
+        raise ValidationError({"status": _("Fund the first pending milestone in order.")})
+
     wallet = get_or_create_wallet_for_user(
         contract.client.account.user,
         currency=contract.currency or PAYMENTS_DEFAULT_CURRENCY,
     )
 
     if milestone.status != Milestone.Status.PENDING:
-        raise ValidationError(
-            {"status": _("Only pending milestones can be funded.")}
-        )
+        raise ValidationError({"status": _("Only pending milestones can be funded.")})
 
     hold_funds_for_escrow(
         wallet=wallet,
@@ -197,6 +217,7 @@ def fund_milestone_from_payment(
     )
 
     milestone.status = Milestone.Status.FUNDED
+    milestone.funded_at = timezone.now()
     milestone.submitted_at = None
     milestone.approved_at = None
     milestone.released_at = None
@@ -205,11 +226,18 @@ def fund_milestone_from_payment(
     milestone.full_clean()
     milestone.save()
 
+    log_contract_event(
+        contract=contract,
+        event_type=ContractEvent.ContractEventType.MILESTONE_FUNDED,
+        actor=initiated_by,
+        metadata={"milestone_id": milestone.id},
+    )
+
     if contract.status in {Contract.Status.DRAFT, Contract.Status.PENDING_FUNDING}:
         _set_contract_state(
             contract,
-            Contract.Status.FUNDED,
-            timestamp_field="funded_at",
+            Contract.Status.IN_PROGRESS,
+            timestamp_field="active_at",
         )
 
     return milestone
@@ -237,13 +265,19 @@ def submit_milestone(
         pk=milestone.pk
     )
 
+    if milestone.contract.status in {
+        Contract.Status.CANCELLED,
+        Contract.Status.WITHDRAWN,
+        Contract.Status.SUSPENDED,
+        Contract.Status.COMPLETED,
+    }:
+        raise ValidationError({"status": _("This contract is not accepting submissions.")})
+
     if milestone.status not in {
         Milestone.Status.FUNDED,
         Milestone.Status.REVISION_REQUESTED,
     }:
-        raise ValidationError(
-            {"status": _("This milestone cannot be submitted in its current state.")}
-        )
+        raise ValidationError({"status": _("This milestone cannot be submitted in its current state.")})
 
     milestone.status = Milestone.Status.SUBMITTED
     milestone.submission_link = submission_link or milestone.submission_link
@@ -252,9 +286,12 @@ def submit_milestone(
     milestone.full_clean()
     milestone.save()
 
-    contract = milestone.contract
-    if contract.status in {Contract.Status.FUNDED, Contract.Status.ACTIVE}:
-        _set_contract_state(contract, Contract.Status.SUBMITTED, timestamp_field="submitted_at")
+    log_contract_event(
+        contract=milestone.contract,
+        event_type=ContractEvent.ContractEventType.MILESTONE_SUBMITTED,
+        actor=user,
+        metadata={"milestone_id": milestone.id},
+    )
 
     return milestone
 
@@ -265,9 +302,10 @@ def request_revision(
     milestone: Milestone,
     user,
     review_note: str = "",
+    revision_scope: str = "",
 ) -> Milestone:
     """
-    Client asks for changes before approval.
+    Client asks for changes on a submitted milestone.
     """
     ensure_milestone_access(milestone, user)
 
@@ -276,21 +314,37 @@ def request_revision(
     if not client or milestone.contract.client_id != client.id:
         raise PermissionDenied(_("Only the client can request a revision."))
 
-    milestone = Milestone.objects.select_for_update().select_related("contract").get(
-        pk=milestone.pk
-    )
+    milestone = Milestone.objects.select_for_update().select_related("contract").get(pk=milestone.pk)
+
+    if milestone.contract.status in {
+        Contract.Status.CANCELLED,
+        Contract.Status.WITHDRAWN,
+        Contract.Status.SUSPENDED,
+        Contract.Status.COMPLETED,
+    }:
+        raise ValidationError({"status": _("This contract is not accepting revisions.")})
 
     if milestone.status != Milestone.Status.SUBMITTED:
-        raise ValidationError(
-            {"status": _("Only submitted milestones can be revised.")}
-        )
+        raise ValidationError({"status": _("Only submitted milestones can be revised.")})
 
     milestone.status = Milestone.Status.REVISION_REQUESTED
     milestone.review_note = review_note or milestone.review_note
+    milestone.revision_scope = revision_scope or milestone.revision_scope
+    milestone.revision_requested_at = timezone.now()
     milestone.full_clean()
     milestone.save()
 
-    _set_contract_state(milestone.contract, Contract.Status.REVISION_REQUESTED)
+    log_contract_event(
+        contract=milestone.contract,
+        event_type=ContractEvent.ContractEventType.MILESTONE_REVISION_REQUESTED,
+        actor=user,
+        metadata={
+            "milestone_id": milestone.pk,
+            "revision_scope": revision_scope,
+            "review_note": review_note,
+        },
+    )
+
     return milestone
 
 
@@ -300,10 +354,14 @@ def approve_milestone(
     milestone: Milestone,
     user,
     review_note: str = "",
-    fee_amount=0,
 ) -> Milestone:
     """
-    Client approves the milestone and triggers escrow release.
+    Client accepts delivered work.
+
+    Escrow is released.
+    Platform fee is deducted.
+    Milestone becomes RELEASED.
+    Contract may become COMPLETED.
     """
     ensure_milestone_access(milestone, user)
 
@@ -312,61 +370,88 @@ def approve_milestone(
     if not client or milestone.contract.client_id != client.id:
         raise PermissionDenied(_("Only the client can approve this milestone."))
 
-    milestone = Milestone.objects.select_for_update().select_related(
-        "contract",
-        "contract__freelancer__account__user",
-    ).get(pk=milestone.pk)
+    milestone = (
+        Milestone.objects
+        .select_for_update()
+        .select_related(
+            "contract",
+            "contract__client",
+            "contract__freelancer",
+        )
+        .get(pk=milestone.pk)
+    )
+
+    if milestone.contract.status in {
+        Contract.Status.CANCELLED,
+        Contract.Status.WITHDRAWN,
+        Contract.Status.SUSPENDED,
+        Contract.Status.COMPLETED,
+    }:
+        raise ValidationError({"status": _("This contract cannot be approved right now.")})
 
     if milestone.status != Milestone.Status.SUBMITTED:
-        raise ValidationError(
-            {"status": _("Only submitted milestones can be approved.")}
-        )
+        raise ValidationError({"status": _("Only submitted milestones can be approved.")})
 
-    hold = EscrowHold.objects.select_for_update().filter(
-        contract_reference=contract_reference_for_milestone(milestone),
-        status=EscrowHold.Status.ACTIVE,
-    ).first()
+    contract = milestone.contract
 
+    hold = _get_milestone_hold(milestone)
     if not hold:
         raise EscrowHoldError(_("Escrow hold not found for this milestone."))
 
-    recipient_wallet = get_or_create_wallet_for_user(
-        milestone.contract.freelancer.account.user,
-        currency=milestone.contract.currency or PAYMENTS_DEFAULT_CURRENCY,
+    freelancer_wallet = get_or_create_wallet_for_user(
+        contract.freelancer.account.user,
+        currency=contract.currency or PAYMENTS_DEFAULT_CURRENCY,
     )
+    fee_wallet = get_or_create_platform_wallet(contract.currency or PAYMENTS_DEFAULT_CURRENCY)
+    fee_amount = calculate_platform_fee(milestone.amount)
 
     release_escrow_hold_to_wallet(
         hold=hold,
-        recipient_wallet=recipient_wallet,
-        idempotency_key=f"milestone:{milestone.pk}:release",
+        recipient_wallet=freelancer_wallet,
+        idempotency_key=f"milestone:{milestone.pk}:approve",
         initiated_by=user,
         amount=milestone.amount,
+        fee_wallet=fee_wallet,
         fee_amount=fee_amount,
         reference_type="milestone",
         reference_id=str(milestone.pk),
-        description=_("Milestone approved and escrow released."),
+        description=f"Milestone #{milestone.pk} approved.",
         metadata={
-            "contract_id": milestone.contract_id,
+            "contract_id": contract.id,
             "milestone_id": milestone.pk,
+            "fee_amount": str(fee_amount),
         },
     )
 
-    milestone.status = Milestone.Status.APPROVED
-    milestone.review_note = review_note or milestone.review_note
+    milestone.status = Milestone.Status.RELEASED
     milestone.approved_at = timezone.now()
     milestone.released_at = timezone.now()
-    milestone.full_clean()
-    milestone.save()
+    if review_note:
+        milestone.review_note = review_note
 
-    contract = milestone.contract
-    if _all_milestones_terminal(contract):
-        _set_contract_state(
-            contract,
-            Contract.Status.RELEASED,
-            timestamp_field="completed_at",
-        )
-    else:
-        _set_contract_state(contract, Contract.Status.APPROVED)
+    milestone.full_clean()
+    milestone.save(
+        update_fields=[
+            "status",
+            "approved_at",
+            "released_at",
+            "review_note",
+            "updated_at",
+        ]
+    )
+
+    log_contract_event(
+        contract=contract,
+        actor=user,
+        event_type=ContractEvent.ContractEventType.MILESTONE_APPROVED,
+        metadata={
+            "milestone_id": milestone.pk,
+            "amount": str(milestone.amount),
+            "fee_amount": str(fee_amount),
+        },
+    )
+
+    sync_contract_completion(contract)
 
     return milestone
 
@@ -392,18 +477,20 @@ def open_dispute(
         pk=milestone.pk
     )
 
+    if milestone.contract.status in {
+        Contract.Status.CANCELLED,
+        Contract.Status.WITHDRAWN,
+        Contract.Status.COMPLETED,
+    }:
+        raise ValidationError({"status": _("This contract cannot be disputed.")})
+
     if milestone.status not in {
         Milestone.Status.SUBMITTED,
         Milestone.Status.REVISION_REQUESTED,
-        Milestone.Status.APPROVED,
     }:
-        raise ValidationError(
-            {"status": _("This milestone cannot be disputed in its current state.")}
-        )
+        raise ValidationError({"status": _("This milestone cannot be disputed in its current state.")})
 
-    hold = EscrowHold.objects.select_for_update().filter(
-        contract_reference=contract_reference_for_milestone(milestone)
-    ).first()
+    hold = _get_milestone_hold(milestone)
 
     if hold and hold.status == EscrowHold.Status.ACTIVE:
         hold.status = EscrowHold.Status.DISPUTED
@@ -416,10 +503,17 @@ def open_dispute(
     milestone.full_clean()
     milestone.save()
 
+    log_contract_event(
+        contract=milestone.contract,
+        event_type=ContractEvent.ContractEventType.MILESTONE_DISPUTED,
+        actor=user,
+        metadata={"milestone_id": milestone.id},
+    )
+
     _set_contract_state(
         milestone.contract,
-        Contract.Status.DISPUTED,
-        timestamp_field="disputed_at",
+        Contract.Status.SUSPENDED,
+        timestamp_field="suspended_at",
         note=dispute_reason or milestone.contract.notes,
     )
 
@@ -443,11 +537,7 @@ def refund_milestone(
         "contract__client__account__user",
     ).get(pk=milestone.pk)
 
-    hold = EscrowHold.objects.select_for_update().filter(
-        contract_reference=contract_reference_for_milestone(milestone),
-        status__in=[EscrowHold.Status.ACTIVE, EscrowHold.Status.DISPUTED],
-    ).first()
-
+    hold = _get_milestone_hold(milestone)
     if not hold:
         raise EscrowHoldError(_("Escrow hold not found for this milestone."))
 
@@ -470,13 +560,14 @@ def refund_milestone(
     milestone.full_clean()
     milestone.save()
 
-    contract = milestone.contract
-    if _all_milestones_terminal(contract):
-        _set_contract_state(
-            contract,
-            Contract.Status.REFUNDED,
-            timestamp_field="completed_at",
-        )
+    log_contract_event(
+        contract=milestone.contract,
+        event_type=ContractEvent.ContractEventType.MILESTONE_REFUNDED,
+        actor=user,
+        metadata={"milestone_id": milestone.id, "refund_note": refund_note},
+    )
+
+    sync_contract_completion(milestone.contract)
 
     return milestone
 
@@ -485,19 +576,97 @@ def refund_milestone(
 def cancel_contract(*, contract: Contract, user, reason: str = "") -> Contract:
     """
     Cancel a contract when no active delivery should continue.
+
+    If the contract already started, we treat the stop as WITHDRAWN and
+    refund any still-held escrowed milestones.
     """
     ensure_party_access(contract, user)
 
-    contract = Contract.objects.select_for_update().get(pk=contract.pk)
-    if contract.status in {Contract.Status.RELEASED, Contract.Status.REFUNDED}:
-        raise ValidationError({"status": _("Completed contracts cannot be cancelled.")})
+    contract = (
+        Contract.objects.select_for_update()
+        .prefetch_related("milestones")
+        .get(pk=contract.pk)
+    )
 
-    contract.status = Contract.Status.CANCELLED
-    contract.cancelled_at = timezone.now()
-    if reason:
-        contract.notes = reason
-    contract.full_clean()
-    contract.save()
+    if contract.status in {
+        Contract.Status.COMPLETED,
+        Contract.Status.CANCELLED,
+        Contract.Status.WITHDRAWN,
+    }:
+        raise ValidationError({"status": _("This contract is already finished.")})
+
+    if contract.milestones.filter(status=Milestone.Status.RELEASED).exists():
+        raise ValidationError({"status": _("Released contracts cannot be cancelled.")})
+
+    started = contract.milestones.exclude(status=Milestone.Status.PENDING).exists()
+
+    if started:
+        refundable_statuses = {
+            Milestone.Status.FUNDED,
+            Milestone.Status.SUBMITTED,
+            Milestone.Status.REVISION_REQUESTED,
+            Milestone.Status.DISPUTED,
+        }
+
+        for milestone in contract.milestones.filter(status__in=refundable_statuses).order_by("order", "created_at"):
+            hold = _get_milestone_hold(milestone)
+            if hold and hold.status in {EscrowHold.Status.ACTIVE, EscrowHold.Status.DISPUTED}:
+                refund_escrow_hold(
+                    hold=hold,
+                    idempotency_key=f"milestone:{milestone.pk}:cancel-refund",
+                    initiated_by=user,
+                    amount=milestone.amount,
+                    reference_type="milestone",
+                    reference_id=str(milestone.pk),
+                    description=reason or _("Contract withdrawn and milestone refunded."),
+                    metadata={
+                        "contract_id": contract.id,
+                        "milestone_id": milestone.pk,
+                        "reason": reason,
+                    },
+                )
+
+            milestone.status = Milestone.Status.REFUNDED
+            milestone.refunded_at = timezone.now()
+            milestone.full_clean()
+            milestone.save(update_fields=["status", "refunded_at", "updated_at"])
+
+            log_contract_event(
+                contract=contract,
+                event_type=ContractEvent.ContractEventType.MILESTONE_REFUNDED,
+                actor=user,
+                metadata={"milestone_id": milestone.id, "reason": reason},
+            )
+
+        _set_contract_state(
+            contract,
+            Contract.Status.WITHDRAWN,
+            timestamp_field="withdrawn_at",
+            note=reason or contract.notes,
+        )
+
+        log_contract_event(
+            contract=contract,
+            event_type=ContractEvent.ContractEventType.CONTRACT_WITHDRAWN,
+            actor=user,
+            metadata={"reason": reason},
+        )
+        return contract
+
+    _set_contract_state(
+        contract,
+        Contract.Status.CANCELLED,
+        timestamp_field="cancelled_at",
+        note=reason or contract.notes,
+    )
+
+    log_contract_event(
+        contract=contract,
+        event_type=ContractEvent.ContractEventType.CONTRACT_CANCELLED,
+        actor=user,
+        metadata={"reason": reason},
+    )
+
     return contract
 
 
@@ -508,18 +677,17 @@ def create_milestone(*, contract, user, title, description, amount, due_date, or
     account = getattr(user, "account", None)
     client = getattr(account, "client_profile", None)
     if not client or contract.client_id != client.id:
-        raise PermissionDenied("Only the client can create milestones.")
+        raise PermissionDenied(_("Only the client can create milestones."))
 
     contract = Contract.objects.select_for_update().get(pk=contract.pk)
 
     if contract.status != Contract.Status.PENDING_FUNDING:
-        raise ValidationError({"detail": "Milestones can only be edited before funding starts."})
+        raise ValidationError({"detail": _("Milestones can only be edited before funding starts.")})
 
     amount = Decimal(str(amount))
-
-    current_total = _milestones_total(contract)
+    current_total = sum((m.amount for m in contract.milestones.all()), Decimal("0.00"))
     if current_total + amount > contract.agreed_price:
-        raise ValidationError({"amount": "Milestones cannot exceed the agreed contract price."})
+        raise ValidationError({"amount": _("Milestones cannot exceed the agreed contract price.")})
 
     milestone = Milestone.objects.create(
         contract=contract,
@@ -530,4 +698,204 @@ def create_milestone(*, contract, user, title, description, amount, due_date, or
         order=order,
         status=Milestone.Status.PENDING,
     )
+
+    log_contract_event(
+        contract=contract,
+        event_type=ContractEvent.ContractEventType.MILESTONE_CREATED,
+        actor=user,
+        metadata={"milestone_id": milestone.id},
+    )
+
+    return milestone
+
+
+@transaction.atomic
+def sync_contract_completion(contract: Contract) -> Contract:
+    """
+    Keep the contract status aligned with the milestone lifecycle.
+
+    - Disputed milestone -> SUSPENDED
+    - All pending -> PENDING_FUNDING
+    - Any funded/submitted/revision-requested/released -> IN_PROGRESS
+    - All terminal and any refunded -> WITHDRAWN
+    - All terminal and no refund -> COMPLETED
+    """
+    contract = Contract.objects.select_for_update().get(pk=contract.pk)
+
+    if contract.status in {
+        Contract.Status.CANCELLED,
+        Contract.Status.WITHDRAWN,
+        Contract.Status.COMPLETED,
+    }:
+        return contract
+
+    milestones = contract.milestones.all()
+
+    if milestones.filter(status=Milestone.Status.DISPUTED).exists():
+        if contract.status != Contract.Status.SUSPENDED:
+            _set_contract_state(
+                contract,
+                Contract.Status.SUSPENDED,
+                timestamp_field="suspended_at",
+            )
+        return contract
+
+    if not milestones.exists():
+        return contract
+
+    if milestones.filter(status=Milestone.Status.PENDING).count() == milestones.count():
+        if contract.status != Contract.Status.PENDING_FUNDING:
+            _set_contract_state(contract, Contract.Status.PENDING_FUNDING)
+        return contract
+
+    active_statuses = {
+        Milestone.Status.FUNDED,
+        Milestone.Status.SUBMITTED,
+        Milestone.Status.REVISION_REQUESTED,
+        Milestone.Status.RELEASED,
+    }
+
+    any_active = milestones.filter(status__in=active_statuses).exists()
+    any_refunded = milestones.filter(status=Milestone.Status.REFUNDED).exists()
+    all_terminal = not milestones.exclude(status__in=TERMINAL_MILESTONE_STATUSES).exists()
+
+    if all_terminal:
+        final_status = Contract.Status.WITHDRAWN if any_refunded else Contract.Status.COMPLETED
+        timestamp_field = "withdrawn_at" if final_status == Contract.Status.WITHDRAWN else "completed_at"
+        if contract.status != final_status:
+            _set_contract_state(contract, final_status, timestamp_field=timestamp_field)
+        return contract
+
+    if any_refunded and not any_active:
+        if contract.status != Contract.Status.WITHDRAWN:
+            _set_contract_state(
+                contract,
+                Contract.Status.WITHDRAWN,
+                timestamp_field="withdrawn_at",
+            )
+        return contract
+
+    if any_active:
+        if contract.status != Contract.Status.IN_PROGRESS:
+            _set_contract_state(
+                contract,
+                Contract.Status.IN_PROGRESS,
+                timestamp_field="active_at",
+            )
+        return contract
+
+    return contract
+
+
+@transaction.atomic
+def resolve_dispute_to_freelancer(*, milestone: Milestone, user, note: str = "") -> Milestone:
+    """
+    Admin-only resolution path:
+    release the disputed escrow to the freelancer.
+    """
+    if not getattr(user, "is_staff", False) and not getattr(user, "is_superuser", False):
+        raise PermissionDenied(_("Only staff can resolve disputes."))
+
+    milestone = Milestone.objects.select_for_update().select_related(
+        "contract",
+        "contract__freelancer__account__user",
+    ).get(pk=milestone.pk)
+
+    if milestone.status != Milestone.Status.DISPUTED:
+        raise ValidationError({"status": _("Only disputed milestones can be resolved.")})
+
+    hold = _get_milestone_hold(milestone)
+    if not hold:
+        raise EscrowHoldError(_("Escrow hold not found for this milestone."))
+
+    recipient_wallet = get_or_create_wallet_for_user(
+        milestone.contract.freelancer.account.user,
+        currency=milestone.contract.currency or PAYMENTS_DEFAULT_CURRENCY,
+    )
+
+    release_escrow_hold_to_wallet(
+        hold=hold,
+        recipient_wallet=recipient_wallet,
+        idempotency_key=f"milestone:{milestone.pk}:dispute:release",
+        initiated_by=user,
+        amount=milestone.amount,
+        reference_type="milestone",
+        reference_id=str(milestone.pk),
+        description=note or _("Dispute resolved in favor of the freelancer."),
+        metadata={
+            "contract_id": milestone.contract_id,
+            "milestone_id": milestone.pk,
+            "resolution": "freelancer",
+        },
+    )
+
+    milestone.status = Milestone.Status.RELEASED
+    milestone.resolution_note = note or milestone.resolution_note
+    milestone.released_at = timezone.now()
+    milestone.full_clean()
+    milestone.save()
+
+    sync_contract_completion(milestone.contract)
+
+    log_contract_event(
+        contract=milestone.contract,
+        event_type=ContractEvent.ContractEventType.MILESTONE_DISPUTE_RESOLVED_TO_FREELANCER,
+        actor=user,
+        metadata={"milestone_id": milestone.pk, "note": note},
+    )
+
+    return milestone
+
+
+@transaction.atomic
+def resolve_dispute_to_client(*, milestone: Milestone, user, note: str = "") -> Milestone:
+    """
+    Admin-only resolution path:
+    refund the disputed escrow back to the client wallet.
+    """
+    if not getattr(user, "is_staff", False) and not getattr(user, "is_superuser", False):
+        raise PermissionDenied(_("Only staff can resolve disputes."))
+
+    milestone = Milestone.objects.select_for_update().select_related(
+        "contract",
+        "contract__client__account__user",
+    ).get(pk=milestone.pk)
+
+    if milestone.status != Milestone.Status.DISPUTED:
+        raise ValidationError({"status": _("Only disputed milestones can be resolved.")})
+
+    hold = _get_milestone_hold(milestone)
+    if not hold:
+        raise EscrowHoldError(_("Escrow hold not found for this milestone."))
+
+    refund_escrow_hold(
+        hold=hold,
+        idempotency_key=f"milestone:{milestone.pk}:dispute:refund",
+        initiated_by=user,
+        amount=milestone.amount,
+        reference_type="milestone",
+        reference_id=str(milestone.pk),
+        description=note or _("Dispute resolved in favor of the client."),
+        metadata={
+            "contract_id": milestone.contract_id,
+            "milestone_id": milestone.pk,
+            "resolution": "client",
+        },
+    )
+
+    milestone.status = Milestone.Status.REFUNDED
+    milestone.resolution_note = note or milestone.resolution_note
+    milestone.refunded_at = timezone.now()
+    milestone.full_clean()
+    milestone.save()
+
+    sync_contract_completion(milestone.contract)
+
+    log_contract_event(
+        contract=milestone.contract,
+        event_type=ContractEvent.ContractEventType.MILESTONE_DISPUTE_RESOLVED_TO_CLIENT,
+        actor=user,
+        metadata={"milestone_id": milestone.pk, "note": note},
+    )
+
     return milestone

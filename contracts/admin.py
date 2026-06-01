@@ -8,6 +8,7 @@ from django.contrib import admin
 from django.utils.translation import gettext_lazy as _
 
 from .models import Contract, Milestone
+from .services import resolve_dispute_to_client, resolve_dispute_to_freelancer
 
 
 class MilestoneInline(admin.TabularInline):
@@ -21,6 +22,7 @@ class MilestoneInline(admin.TabularInline):
         "due_date",
         "order",
         "status",
+        "funded_at",
         "submitted_at",
         "approved_at",
         "released_at",
@@ -62,14 +64,12 @@ class ContractAdmin(admin.ModelAdmin):
     readonly_fields = (
         "created_at",
         "updated_at",
-        "funded_at",
         "active_at",
-        "submitted_at",
         "completed_at",
+        "suspended_at",
+        "withdrawn_at",
         "cancelled_at",
-        "disputed_at",
-        "released_at",
-        "refunded_at",
+
     )
     inlines = [MilestoneInline]
 
@@ -82,14 +82,11 @@ class ContractAdmin(admin.ModelAdmin):
             _("Timestamps"),
             {
                 "fields": (
-                    "funded_at",
                     "active_at",
-                    "submitted_at",
                     "completed_at",
                     "cancelled_at",
-                    "disputed_at",
-                    "released_at",
-                    "refunded_at",
+                    "suspended_at",
+                    "withdrawn_at",
                     "created_at",
                     "updated_at",
                 ),
@@ -128,11 +125,13 @@ class MilestoneAdmin(admin.ModelAdmin):
     readonly_fields = (
         "created_at",
         "updated_at",
+        "funded_at",
         "submitted_at",
         "approved_at",
         "released_at",
         "refunded_at",
         "disputed_at",
+        "review_due_at",
     )
     fieldsets = (
         (_("Details"), {"fields": ("contract", "title", "description", "currency", "amount", "due_date", "order")}),
@@ -141,11 +140,13 @@ class MilestoneAdmin(admin.ModelAdmin):
             _("Timestamps"),
             {
                 "fields": (
+                    "funded_at",
                     "submitted_at",
                     "approved_at",
                     "released_at",
                     "refunded_at",
                     "disputed_at",
+                    "review_due_at",
                     "created_at",
                     "updated_at",
                 ),
@@ -153,3 +154,13 @@ class MilestoneAdmin(admin.ModelAdmin):
             },
         ),
     )
+
+    @admin.action(description="Resolve dispute to freelancer")
+    def resolve_to_freelancer(self, request, queryset):
+        for milestone in queryset:
+            resolve_dispute_to_freelancer(milestone=milestone, user=request.user)
+
+    @admin.action(description="Resolve dispute to client")
+    def resolve_to_client(self, request, queryset):
+        for milestone in queryset:
+            resolve_dispute_to_client(milestone=milestone, user=request.user)
