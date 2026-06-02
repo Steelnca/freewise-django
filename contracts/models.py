@@ -261,23 +261,17 @@ class Contract(models.Model):
 
     @property
     def released_amount(self) -> Decimal:
-        total = self.milestones.filter(
-            status=Milestone.Status.RELEASED
-        ).aggregate(total=Sum("amount"))["total"]
+        total = self.milestones.filter(status=Milestone.Status.RELEASED).aggregate(total=Sum("amount"))["total"]
         return total or Decimal("0.00")
 
     @property
     def refunded_amount(self) -> Decimal:
-        total = self.milestones.filter(
-            status=Milestone.Status.REFUNDED
-        ).aggregate(total=Sum("amount"))["total"]
+        total = self.milestones.filter(status=Milestone.Status.REFUNDED).aggregate(total=Sum("amount"))["total"]
         return total or Decimal("0.00")
 
     @property
     def pending_amount(self) -> Decimal:
-        total = self.milestones.filter(
-            status=Milestone.Status.PENDING
-        ).aggregate(total=Sum("amount"))["total"]
+        total = self.milestones.filter(status=Milestone.Status.PENDING).aggregate(total=Sum("amount"))["total"]
         return total or Decimal("0.00")
 
 

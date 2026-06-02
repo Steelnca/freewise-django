@@ -6,6 +6,8 @@ DEBUG = env.bool('DJANGO_DEBUG', default=False)
 
 DOMAIN = env('DOMAIN')  # e.g., "freewise.com"
 
+FREEWISE_WEBHOOK_BASE_URL = env("FREEWISE_WEBHOOK_BASE_URL", default=f"https://{DOMAIN}")
+
 # Use HTTPOnly and secure cookies in production
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SECURE = True                  # True on HTTPS only (must enable in prod)

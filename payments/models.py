@@ -15,6 +15,7 @@ that create WalletTransaction rows inside database transactions.
 """
 
 from decimal import Decimal
+from uuid import uuid4
 
 from django.core.validators import MinValueValidator
 from django.conf import settings
@@ -23,7 +24,7 @@ from django.db import models
 from django.utils.translation import gettext_lazy as _
 
 from .constants import MONEY_MAX_DIGITS, MONEY_DECIMAL_PLACES
-
+from .managers import PaymentAttemptManager
 
 class Currency(models.TextChoices):
     DZD = "DZD", _("Algerian Dinar")
@@ -681,3 +682,313 @@ class WebhookLog(TimeStampedModel):
 
     def __str__(self) -> str:
         return f"{self.provider_name} - {self.event_name} - {self.created_at:%Y-%m-%d %H:%M:%S}"
+
+class PaymentAttempt(models.Model):
+    """
+    One external payment attempt for one milestone funding action.
+
+    Freewise owns the truth. Chargily is only the provider snapshot.
+    """
+
+    class Provider(models.TextChoices):
+        CHARGILY = "chargily", _("Chargily")
+
+    class InternalStatus(models.TextChoices):
+        CREATED = "CREATED", _("Created")
+        REDIRECTED = "REDIRECTED", _("Redirected to provider")
+        PENDING_PROVIDER = "PENDING_PROVIDER", _("Waiting for provider confirmation")
+        PROCESSING = "PROCESSING", _("Processing")
+        PAID_PROVIDER_NOT_SETTLED = "PAID_PROVIDER_NOT_SETTLED", _("Paid by provider, not settled yet")
+        SETTLED = "SETTLED", _("Settled in Freewise")
+        FAILED = "FAILED", _("Failed")
+        CANCELED = "CANCELED", _("Canceled")
+        EXPIRED = "EXPIRED", _("Expired")
+        RECONCILED = "RECONCILED", _("Reconciled from provider status")
+        WEBHOOK_RECEIVED = "WEBHOOK_RECEIVED", _("Webhook received")
+
+    objects = PaymentAttemptManager()
+
+    attempt_id = models.UUIDField(
+        default=uuid4,
+        editable=False,
+        unique=True,
+        verbose_name=_("attempt id"),
+        help_text=_("Internal unique ID for this payment attempt."),
+    )
+
+    contract = models.ForeignKey(
+        "contracts.Contract",
+        on_delete=models.CASCADE,
+        related_name="payment_attempts",
+        verbose_name=_("contract"),
+        help_text=_("Contract this payment attempt belongs to."),
+    )
+
+    milestone = models.ForeignKey(
+        "contracts.Milestone",
+        on_delete=models.CASCADE,
+        related_name="payment_attempts",
+        verbose_name=_("milestone"),
+        help_text=_("Milestone being funded by this payment attempt."),
+    )
+
+    initiated_by = models.ForeignKey(
+        "users.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="initiated_payment_attempts",
+        verbose_name=_("initiated by"),
+        help_text=_("User who started this payment attempt."),
+    )
+
+    provider = models.CharField(
+        max_length=32,
+        choices=Provider.choices,
+        default=Provider.CHARGILY,
+        db_index=True,
+        verbose_name=_("provider"),
+        help_text=_("Payment provider used for this attempt."),
+    )
+
+    attempt_number = models.PositiveSmallIntegerField(
+        default=1,
+        verbose_name=_("attempt number"),
+        help_text=_("1 for the first try, 2 for the retry, and so on."),
+    )
+
+    amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        verbose_name=_("amount"),
+        help_text=_("Amount requested from the client for this milestone."),
+    )
+
+    currency = models.CharField(
+        max_length=3,
+        verbose_name=_("currency"),
+        help_text=_("Currency code used for this payment attempt."),
+    )
+
+    internal_status = models.CharField(
+        max_length=40,
+        choices=InternalStatus.choices,
+        default=InternalStatus.CREATED,
+        db_index=True,
+        verbose_name=_("internal status"),
+        help_text=_("Freewise payment state for this attempt."),
+    )
+
+    provider_status = models.CharField(
+        max_length=40,
+        blank=True,
+        default="",
+        db_index=True,
+        verbose_name=_("provider status"),
+        help_text=_("Latest status reported by Chargily."),
+    )
+
+    provider_checkout_id = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        unique=True,
+        db_index=True,
+        verbose_name=_("provider checkout id"),
+        help_text=_("Chargily checkout ID returned when the attempt was created."),
+    )
+
+    provider_checkout_url = models.URLField(
+        blank=True,
+        default="",
+        verbose_name=_("provider checkout url"),
+        help_text=_("Hosted payment link returned by Chargily."),
+    )
+
+    provider_payment_method = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        verbose_name=_("provider payment method"),
+        help_text=_("Payment method selected at the provider checkout."),
+    )
+
+    provider_reference = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        db_index=True,
+        verbose_name=_("provider reference"),
+        help_text=_("Any extra reference returned or echoed by the provider."),
+    )
+
+    idempotency_key = models.CharField(
+        max_length=128,
+        unique=True,
+        db_index=True,
+        verbose_name=_("idempotency key"),
+        help_text=_("Prevents duplicate attempts being created twice."),
+    )
+
+    success_url = models.URLField(
+        blank=True,
+        default="",
+        verbose_name=_("success url"),
+        help_text=_("Success redirect URL used for this attempt."),
+    )
+
+    failure_url = models.URLField(
+        blank=True,
+        default="",
+        verbose_name=_("failure url"),
+        help_text=_("Failure redirect URL used for this attempt."),
+    )
+
+    expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("expires at"),
+        help_text=_("When the checkout is expected to expire."),
+    )
+
+    provider_created_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("provider created at"),
+        help_text=_("When the provider checkout was created."),
+    )
+
+    provider_paid_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("provider paid at"),
+        help_text=_("When the provider marked the checkout as paid."),
+    )
+
+    webhook_received_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("webhook received at"),
+        help_text=_("When Freewise received a webhook for this attempt."),
+    )
+
+    webhook_processed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("webhook processed at"),
+        help_text=_("When the webhook was fully processed by Freewise."),
+    )
+
+    reconciled_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("reconciled at"),
+        help_text=_("When Freewise reconciled this attempt from provider status."),
+    )
+
+    last_reconciled_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("last reconciled at"),
+        help_text=_("When Freewise last tried to reconcile this attempt from provider status."),
+    )
+
+    settled_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("settled at"),
+        help_text=_("When Freewise finalized the money flow from this attempt."),
+    )
+
+    failure_reason = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("failure reason"),
+        help_text=_("Human-readable reason why the attempt failed."),
+    )
+
+    webhook_payload = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name=_("webhook payload"),
+        help_text=_("Raw webhook payload received from the provider."),
+    )
+
+    provider_snapshot = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name=_("provider snapshot"),
+        help_text=_("Latest provider checkout snapshot stored by Freewise."),
+    )
+
+    settlement_transaction = models.OneToOneField(
+        "payments.WalletTransaction",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="payment_attempt",
+        verbose_name=_("settlement transaction"),
+        help_text=_("Wallet transaction created when the attempt was settled."),
+    )
+
+    escrow_hold = models.OneToOneField(
+        "payments.EscrowHold",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="payment_attempt",
+        verbose_name=_("escrow hold"),
+        help_text=_("Escrow hold created after the payment was settled."),
+    )
+
+    retry_of = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="retries",
+        verbose_name=_("retry of"),
+        help_text=_("Previous payment attempt that this one retried."),
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name=_("created at"),
+        help_text=_("When this payment attempt was created."),
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        verbose_name=_("updated at"),
+        help_text=_("When this payment attempt was last updated."),
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = _("payment attempt")
+        verbose_name_plural = _("payment attempts")
+        indexes = [
+            models.Index(fields=["contract", "milestone"]),
+            models.Index(fields=["provider", "provider_status"]),
+            models.Index(fields=["internal_status"]),
+            models.Index(fields=["idempotency_key"]),
+            models.Index(fields=["provider_checkout_id"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["milestone", "attempt_number"],
+                name="unique_payment_attempt_number_per_milestone",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"PaymentAttempt #{self.pk} — {self.milestone.title}"
+
+    @property
+    def is_final(self) -> bool:
+        return self.internal_status in {
+            self.InternalStatus.SETTLED,
+            self.InternalStatus.FAILED,
+            self.InternalStatus.CANCELED,
+            self.InternalStatus.EXPIRED,
+        }

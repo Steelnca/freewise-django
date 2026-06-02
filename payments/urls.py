@@ -8,6 +8,7 @@ from .views import (
     MyPayoutsView,
     MyEscrowView,
     RequestPayoutView,
+    PaymentGatewayWebhookView,
 )
 
 urlpatterns = [
@@ -17,5 +18,7 @@ urlpatterns = [
     path("payouts/", MyPayoutsView.as_view(), name="payout-list"),
     path("payouts/request/", RequestPayoutView.as_view(), name="payout-request"),
     path("escrow/", MyEscrowView.as_view(), name="escrow-list"),
+
+    path("webhooks/<slug:provider_name>/", PaymentGatewayWebhookView.as_view(), name="payment-gateway-webhook"),
     path("webhooks/chargily/", ChargilyWebhookView.as_view(), name="chargily-webhook"),
 ]
