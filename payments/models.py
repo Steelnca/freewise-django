@@ -791,11 +791,12 @@ class PaymentAttempt(models.Model):
     provider_checkout_id = models.CharField(
         max_length=128,
         blank=True,
-        default="",
+        null=True,
+        default=None,
         unique=True,
         db_index=True,
         verbose_name=_("provider checkout id"),
-        help_text=_("Chargily checkout ID returned when the attempt was created."),
+        help_text=_("Chargily or gateway checkout ID returned after checkout creation."),
     )
 
     provider_checkout_url = models.URLField(

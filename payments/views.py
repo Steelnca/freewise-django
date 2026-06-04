@@ -34,7 +34,6 @@ from contracts.models import Contract, Milestone
 from contracts.services import ensure_party_access
 
 from .gateways import get_payment_gateway
-from .chargily import verify_webhook_signature
 from .models import Wallet, WalletTransaction, EscrowHold, Payout, WebhookLog, PaymentAttempt
 from .serializers import (
     WalletSerializer,
@@ -50,10 +49,11 @@ from .services import (
     create_payment_attempt_for_milestone,
     fail_payment_attempt,
     process_payment_gateway_webhook,
+    retry_payment_attempt_checkout,
+    refresh_payment_attempt_from_provider,
+    milestone_has_settled_or_paid_payment,
 )
 from .constants import DEFAULT_CURRENCY
-from .webhooks import PaymentWebhookError, reconcile_chargily_webhook_log
-from .utils import find_first_key_recursive
 from .reconciliation import reconcile_attempt
 
 
@@ -252,9 +252,10 @@ class FundMilestoneView(APIView):
                     {"detail": _("This contract is not accepting funding right now.")}
                 )
 
-            if milestone.status != Milestone.Status.PENDING:
-                raise ValidationError(
-                    {"detail": _("Only pending milestones can be funded.")}
+            if milestone_has_settled_or_paid_payment(milestone=milestone):
+                return Response(
+                    {"detail": _("This milestone is already funded. No new checkout can be created.")},
+                    status=status.HTTP_409_CONFLICT,
                 )
 
             first_pending = (
@@ -262,6 +263,7 @@ class FundMilestoneView(APIView):
                 .order_by("order", "created_at")
                 .first()
             )
+
             if not first_pending or first_pending.pk != milestone.pk:
                 raise ValidationError(
                     {"detail": _("Fund the first pending milestone in order.")}
@@ -374,6 +376,7 @@ class FundMilestoneView(APIView):
 
         except ValidationError as exc:
             detail = exc.message_dict if hasattr(exc, "message_dict") else exc.messages
+            raise ValidationError({"detail": detail})
             return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
 
         except Exception as exc:
@@ -446,119 +449,6 @@ class PaymentGatewayWebhookView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-class ChargilyWebhookView(APIView):
-    """
-    POST /api/payments/webhooks/chargily/
-    Handles Chargily payment webhooks.
-    """
-    permission_classes = [AllowAny]
-
-    def extract_event_name(self, payload: dict[str, Any]) -> str:
-        for source in (payload.get("data"), payload):
-            found = find_first_key_recursive(source, ("status", "event", "type"))
-            if found:
-                return found
-        return "unknown"
-
-    def post(self, request):
-        raw_body = request.body
-        signature = request.headers.get("signature", "")
-        signature_valid = verify_webhook_signature(raw_body, signature)
-
-        try:
-            payload = json.loads(raw_body.decode("utf-8"))
-            print(f"Received Chargily webhook with payload: {payload}")
-        except json.JSONDecodeError:
-            return Response(
-                {"detail": _("Invalid JSON.")},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        provider_event_id = str(
-            payload.get("invoice_id") or payload.get("payment_id") or payload.get("id") or ""
-        ).strip()
-        event_name = self.extract_event_name(payload=payload)
-
-        if not provider_event_id:
-            return Response(
-                {"detail": _("Missing provider reference.")},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        webhook_log, webhook_created = WebhookLog.objects.get_or_create(
-            provider_name="chargily",
-            provider_event_id=provider_event_id,
-            defaults={
-                "event_name": event_name,
-                "status": WebhookLog.Status.RECEIVED,
-                "signature_valid": signature_valid,
-                "raw_body": raw_body.decode("utf-8", errors="replace"),
-                "payload": payload,
-                "headers": dict(request.headers),
-            },
-        )
-
-        if webhook_log.processed:
-            return Response(
-                {"detail": _("Already processed.")},
-                status=status.HTTP_200_OK,
-            )
-
-        webhook_log.signature_valid = signature_valid
-        webhook_log.event_name = event_name
-        webhook_log.raw_body = raw_body.decode("utf-8", errors="replace")
-        webhook_log.payload = payload
-        webhook_log.headers = dict(request.headers)
-        webhook_log.save(
-            update_fields=[
-                "signature_valid",
-                "event_name",
-                "raw_body",
-                "payload",
-                "headers",
-                "updated_at",
-            ]
-        )
-
-        if not signature_valid:
-            webhook_log.status = WebhookLog.Status.FAILED
-            webhook_log.processing_error = _("Invalid webhook signature.")
-            webhook_log.save(
-                update_fields=["status", "processing_error", "updated_at"]
-            )
-            return Response(
-                {"detail": _("Invalid signature.")},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            reconcile_chargily_webhook_log(webhook_log=webhook_log)
-        except PaymentWebhookError as exc:
-            webhook_log.status = WebhookLog.Status.FAILED
-            webhook_log.processing_error = str(exc)
-            webhook_log.save(
-                update_fields=["status", "processing_error", "updated_at"]
-            )
-            return Response(
-                {"detail": str(exc)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        except Exception as exc:
-            webhook_log.status = WebhookLog.Status.FAILED
-            webhook_log.processing_error = str(exc)
-            webhook_log.save(
-                update_fields=["status", "processing_error", "updated_at"]
-            )
-            return Response(
-                {"detail": _("Webhook processing failed.")},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        return Response(
-            {"detail": _("Webhook processed successfully.")},
-            status=status.HTTP_200_OK,
-        )
-
 
 class ReconcilePaymentAttemptView(APIView):
 
@@ -579,3 +469,159 @@ class ReconcilePaymentAttemptView(APIView):
             "attempt_id": str(updated.attempt_id),
             "status": updated.internal_status,
         })
+
+
+class PaymentAttemptStatusView(APIView):
+    """
+    GET /api/payments/attempts/<uuid:attempt_id>/status/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, attempt_id):
+        attempt = get_object_or_404(
+            PaymentAttempt.objects.select_related("contract", "milestone"),
+            attempt_id=attempt_id,
+        )
+
+        ensure_party_access(attempt.contract, request.user)
+
+        attempt = refresh_payment_attempt_from_provider(attempt=attempt)
+
+        if not attempt.is_final and attempt.provider_checkout_id:
+            attempt = reconcile_attempt(attempt)
+
+        retryable = attempt.internal_status in {
+            PaymentAttempt.InternalStatus.FAILED,
+            PaymentAttempt.InternalStatus.CANCELED,
+            PaymentAttempt.InternalStatus.EXPIRED,
+        }
+
+        return Response(
+            {
+                "payment_attempt_id": str(attempt.attempt_id),
+                "contract_id": attempt.contract_id,
+                "milestone_id": attempt.milestone_id,
+                "provider": attempt.provider,
+                "checkout_id": attempt.provider_checkout_id,
+                "checkout_url": attempt.provider_checkout_url,
+                "internal_status": attempt.internal_status,
+                "provider_status": attempt.provider_status,
+                "is_final": attempt.is_final,
+                "retryable": retryable,
+                "amount": str(attempt.amount),
+                "currency": attempt.currency,
+                "provider_paid_at": attempt.provider_paid_at,
+                "webhook_received_at": attempt.webhook_received_at,
+                "webhook_processed_at": attempt.webhook_processed_at,
+                "reconciled_at": attempt.reconciled_at,
+                "settled_at": attempt.settled_at,
+                "failure_reason": attempt.failure_reason,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+class RetryPaymentAttemptView(APIView):
+    """
+    POST /api/payments/attempts/<attempt_id>/retry/
+
+    Reuses an open checkout if it exists.
+    Creates a new checkout only when the latest attempt is retryable.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _webhook_base_url(self, request) -> str:
+        base_url = getattr(settings, "FREEWISE_WEBHOOK_BASE_URL", "").strip().rstrip("/")
+        if base_url:
+            return base_url
+        return request.build_absolute_uri("/").rstrip("/")
+
+    def _build_redirect_urls(self, request, *, attempt: PaymentAttempt):
+        frontend_base = getattr(settings, "FREEWISE_FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+        query = urlencode(
+            {
+                "attempt": str(attempt.attempt_id),
+                "milestone": str(attempt.milestone_id),
+                "contract": str(attempt.contract_id),
+                "provider": attempt.provider,
+            }
+        )
+
+        success_url = f"{frontend_base}/payments/success?{query}"
+        failure_url = f"{frontend_base}/payments/failed?{query}"
+        webhook_url = f"{self._webhook_base_url(request)}/api/payments/webhooks/{attempt.provider}/"
+        return success_url, failure_url, webhook_url
+
+    def post(self, request, attempt_id):
+        try:
+            attempt = get_object_or_404(
+                PaymentAttempt.objects.select_related("contract", "milestone"),
+                attempt_id=attempt_id,
+            )
+
+            ensure_party_access(attempt.contract, request.user)
+
+            account = getattr(request.user, "account", None)
+            client = getattr(account, "client_profile", None)
+            if not client or attempt.contract.client_id != client.id:
+                raise PermissionDenied(_("Only the client can retry this payment."))
+
+            if milestone_has_settled_or_paid_payment(milestone=attempt.milestone):
+                return Response(
+                    {"detail": _("This milestone is already funded. Retry is disabled.")},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            gateway = get_payment_gateway(attempt.provider)
+
+            success_url, failure_url, webhook_url = self._build_redirect_urls(
+                request,
+                attempt=attempt,
+            )
+
+            next_key = (
+                request.headers.get("Idempotency-Key")
+                or request.headers.get("X-Idempotency-Key")
+                or f"retry:milestone:{attempt.milestone_id}:attempt:{attempt.attempt_number + 1}"
+            )
+
+            retry_attempt = retry_payment_attempt_checkout(
+                attempt=attempt,
+                gateway=gateway,
+                idempotency_key=next_key,
+                initiated_by=request.user,
+                success_url=success_url,
+                failure_url=failure_url,
+                webhook_url=webhook_url,
+            )
+
+            return Response(
+                {
+                    "checkout_url": retry_attempt.provider_checkout_url,
+                    "checkout_id": retry_attempt.provider_checkout_id,
+                    "payment_attempt_id": str(retry_attempt.attempt_id),
+                    "milestone_id": retry_attempt.milestone_id,
+                    "amount": str(retry_attempt.amount),
+                    "currency": retry_attempt.currency,
+                    "attempt_status": retry_attempt.internal_status,
+                    "provider_status": retry_attempt.provider_status,
+                    "provider": retry_attempt.provider,
+                },
+                status=status.HTTP_200_OK if retry_attempt.pk == attempt.pk else status.HTTP_201_CREATED,
+            )
+
+        except PermissionDenied as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+
+        except ValidationError as exc:
+            detail = exc.message_dict if hasattr(exc, "message_dict") else exc.messages
+            text = str(detail).lower()
+            code = status.HTTP_409_CONFLICT if "already paid" in text else status.HTTP_400_BAD_REQUEST
+            return Response({"detail": detail}, status=code)
+
+        except Exception:
+            logger.exception("Retry checkout failed for attempt=%s", attempt_id)
+            return Response(
+                {"detail": _("Failed to create retry checkout.")},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )

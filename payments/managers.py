@@ -1,14 +1,13 @@
-
 from __future__ import annotations
 
-from decimal import Decimal
-from typing import Any, Optional
-from django.utils import timezone
 from datetime import timedelta
+from typing import Any, Optional
 
 from django.core.exceptions import ValidationError
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
+
+from core.utils import json_safe_dict
 
 
 class PaymentAttemptQuerySet(models.QuerySet):
@@ -50,9 +49,7 @@ class PaymentAttemptQuerySet(models.QuerySet):
         )
 
     def unresolved(self):
-        return self.open().exclude(
-            internal_status=self.model.InternalStatus.PAID_PROVIDER_NOT_SETTLED
-        )
+        return self.open()
 
     def stale(self, minutes: int = 5):
         cutoff = timezone.now() - timedelta(minutes=minutes)
@@ -68,11 +65,8 @@ class PaymentAttemptQuerySet(models.QuerySet):
 
 class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)):
     def get_queryset(self):
-        return (
-            super()
-            .get_queryset()
-            .select_related("contract", "milestone", "initiated_by", "retry_of")
-        )
+        # Keep this safe: only non-nullable relations here.
+        return super().get_queryset().select_related("contract", "milestone")
 
     def for_milestone(self, milestone):
         return self.get_queryset().for_milestone(milestone)
@@ -80,20 +74,35 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
     def for_contract(self, contract):
         return self.get_queryset().for_contract(contract)
 
+    def open(self):
+        return self.get_queryset().open()
+
+    def final(self):
+        return self.get_queryset().final()
+
+    def retryable(self):
+        return self.get_queryset().retryable()
+
+    def unresolved(self):
+        return self.get_queryset().unresolved()
+
+    def stale(self, minutes: int = 5):
+        return self.get_queryset().stale(minutes=minutes)
+
     def latest_for_milestone(self, milestone):
         return self.get_queryset().latest_for_milestone(milestone)
 
     @transaction.atomic
     def next_attempt_number(self, milestone) -> int:
         """
-        Safe even under concurrency: lock the milestone's rows before computing.
+        Safe under concurrency: lock the rows for this milestone before numbering.
         """
-        locked_attempts = list(
-            self.select_for_update()
+        existing_numbers = list(
+            self.model._base_manager.select_for_update()
             .filter(milestone=milestone)
             .values_list("attempt_number", flat=True)
         )
-        return (max(locked_attempts) if locked_attempts else 0) + 1
+        return (max(existing_numbers) if existing_numbers else 0) + 1
 
     @transaction.atomic
     def create_attempt(
@@ -119,7 +128,14 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
         if not idempotency_key:
             raise ValidationError({"idempotency_key": "Idempotency key is required."})
 
-        existing = self.select_for_update().filter(idempotency_key=idempotency_key).first()
+        if retry_of is not None and retry_of.milestone_id != milestone.id:
+            raise ValidationError(
+                {"retry_of": "Retry attempts must belong to the same milestone."}
+            )
+
+        existing = self.model._base_manager.filter(
+            idempotency_key=idempotency_key
+        ).first()
         if existing:
             if existing.milestone_id != milestone.id:
                 raise ValidationError(
@@ -144,10 +160,15 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
             success_url=success_url or "",
             failure_url=failure_url or "",
             retry_of=retry_of,
-            provider_snapshot=provider_snapshot or {},
+            provider_snapshot=json_safe_dict(provider_snapshot),
         )
         attempt.full_clean()
-        attempt.save()
+
+        try:
+            attempt.save()
+        except IntegrityError:
+            return self.model._base_manager.get(idempotency_key=idempotency_key)
+
         return attempt
 
     @transaction.atomic
@@ -162,15 +183,19 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
         provider_snapshot: Optional[dict[str, Any]] = None,
     ):
         """
-        Store the provider checkout details after Freewise creates the checkout.
+        Store provider checkout details after checkout creation.
         """
-        attempt = self.select_for_update().get(pk=attempt.pk)
+        attempt = (
+            self.model._base_manager.select_for_update()
+            .select_related("contract", "milestone")
+            .get(pk=attempt.pk)
+        )
 
         attempt.provider_checkout_id = provider_checkout_id or attempt.provider_checkout_id
         attempt.provider_checkout_url = provider_checkout_url or attempt.provider_checkout_url
         attempt.provider_status = provider_status or attempt.provider_status
         attempt.expires_at = expires_at or attempt.expires_at
-        attempt.provider_snapshot = provider_snapshot or attempt.provider_snapshot
+        attempt.provider_snapshot = json_safe_dict(provider_snapshot or attempt.provider_snapshot)
         attempt.provider_created_at = attempt.provider_created_at or timezone.now()
         attempt.internal_status = self.model.InternalStatus.REDIRECTED
 
@@ -200,14 +225,18 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
         """
         Save webhook payload once, safely.
         """
-        attempt = self.select_for_update().get(pk=attempt.pk)
+        attempt = (
+            self.model._base_manager.select_for_update()
+            .select_related("contract", "milestone")
+            .get(pk=attempt.pk)
+        )
 
-        attempt.webhook_payload = payload or attempt.webhook_payload
+        attempt.webhook_payload = json_safe_dict(payload or attempt.webhook_payload)
         attempt.webhook_received_at = attempt.webhook_received_at or timezone.now()
         if provider_status:
             attempt.provider_status = provider_status
-        if provider_snapshot:
-            attempt.provider_snapshot = provider_snapshot
+        if provider_snapshot is not None:
+            attempt.provider_snapshot = json_safe_dict(provider_snapshot)
 
         attempt.save(
             update_fields=[
@@ -231,11 +260,15 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
         """
         Update the attempt from the provider's current checkout status.
         """
-        attempt = self.select_for_update().get(pk=attempt.pk)
+        attempt = (
+            self.model._base_manager.select_for_update()
+            .select_related("contract", "milestone")
+            .get(pk=attempt.pk)
+        )
 
         attempt.provider_status = provider_status or attempt.provider_status
-        if provider_snapshot:
-            attempt.provider_snapshot = provider_snapshot
+        if provider_snapshot is not None:
+            attempt.provider_snapshot = json_safe_dict(provider_snapshot)
 
         status_map = {
             "pending": self.model.InternalStatus.PENDING_PROVIDER,
@@ -245,8 +278,10 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
             "canceled": self.model.InternalStatus.CANCELED,
             "expired": self.model.InternalStatus.EXPIRED,
         }
+
+        normalized = (provider_status or "").strip().lower()
         attempt.internal_status = status_map.get(
-            (provider_status or "").strip().lower(),
+            normalized,
             attempt.internal_status,
         )
         attempt.reconciled_at = timezone.now()
@@ -274,7 +309,15 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
         """
         Mark the attempt fully settled in Freewise.
         """
-        attempt = self.select_for_update().get(pk=attempt.pk)
+        attempt = (
+            self.model._base_manager.select_for_update()
+            .select_related("contract", "milestone")
+            .get(pk=attempt.pk)
+        )
+
+        if attempt.internal_status == self.model.InternalStatus.SETTLED:
+            return attempt
+
         attempt.internal_status = self.model.InternalStatus.SETTLED
         attempt.provider_status = provider_status or attempt.provider_status
         attempt.settled_at = attempt.settled_at or timezone.now()
@@ -304,7 +347,15 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
         reason: str = "",
         provider_status: str = "failed",
     ):
-        attempt = self.select_for_update().get(pk=attempt.pk)
+        attempt = (
+            self.model._base_manager.select_for_update()
+            .select_related("contract", "milestone")
+            .get(pk=attempt.pk)
+        )
+
+        if attempt.internal_status == self.model.InternalStatus.FAILED:
+            return attempt
+
         attempt.internal_status = self.model.InternalStatus.FAILED
         attempt.provider_status = provider_status or attempt.provider_status
         if reason:
@@ -328,7 +379,15 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
         reason: str = "",
         provider_status: str = "canceled",
     ):
-        attempt = self.select_for_update().get(pk=attempt.pk)
+        attempt = (
+            self.model._base_manager.select_for_update()
+            .select_related("contract", "milestone")
+            .get(pk=attempt.pk)
+        )
+
+        if attempt.internal_status == self.model.InternalStatus.CANCELED:
+            return attempt
+
         attempt.internal_status = self.model.InternalStatus.CANCELED
         attempt.provider_status = provider_status or attempt.provider_status
         if reason:
@@ -352,7 +411,15 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
         reason: str = "",
         provider_status: str = "expired",
     ):
-        attempt = self.select_for_update().get(pk=attempt.pk)
+        attempt = (
+            self.model._base_manager.select_for_update()
+            .select_related("contract", "milestone")
+            .get(pk=attempt.pk)
+        )
+
+        if attempt.internal_status == self.model.InternalStatus.EXPIRED:
+            return attempt
+
         attempt.internal_status = self.model.InternalStatus.EXPIRED
         attempt.provider_status = provider_status or attempt.provider_status
         if reason:
@@ -381,6 +448,12 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
         """
         Create a new attempt chained from a previous one.
         """
+        previous_attempt = (
+            self.model._base_manager.select_for_update()
+            .select_related("contract", "milestone")
+            .get(pk=previous_attempt.pk)
+        )
+
         return self.create_attempt(
             milestone=previous_attempt.milestone,
             idempotency_key=idempotency_key,
@@ -389,4 +462,6 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
             retry_of=previous_attempt,
             success_url=success_url or previous_attempt.success_url,
             failure_url=failure_url or previous_attempt.failure_url,
+            provider_snapshot=previous_attempt.provider_snapshot,
+            provider_status="",
         )

@@ -19,8 +19,10 @@ Best practice:
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, Iterable, Mapping, Optional
+from dataclasses import asdict
 
 from django.contrib.auth import get_user_model
 from django.conf import settings
@@ -30,12 +32,16 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import PermissionDenied
 
-from contracts.models import Milestone
+from contracts.models import Contract, Milestone
 from payments.gateways import BasePaymentGateway, GatewayWebhookEvent
+from payments.gateways import get_payment_gateway
+from core.utils import json_safe_dict
+
 
 from .constants import DEFAULT_CURRENCY
 from .models import EscrowHold, PaymentAttempt, Payout, Wallet, WalletTransaction
 
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 MONEY_QUANTIZER = Decimal("0.01")
@@ -1027,12 +1033,14 @@ def create_payment_attempt_for_milestone(
         retry_of=retry_of,
         success_url=success_url,
         failure_url=failure_url,
-        provider_snapshot={
-            "milestone_id": milestone.id,
-            "contract_id": contract.id,
-            "amount": str(milestone.amount),
-            "currency": currency,
-        },
+        provider_snapshot=json_safe_dict(
+            {
+                "milestone_id": milestone.id,
+                "contract_id": contract.id,
+                "amount": milestone.amount,
+                "currency": currency,
+            }
+        ),
     )
 
     return attempt
@@ -1067,6 +1075,8 @@ def attach_checkout_to_payment_attempt(
     if "data" in snapshot and isinstance(snapshot["data"], dict):
         snapshot = snapshot["data"]
 
+    snapshot = json_safe_dict(snapshot)
+
     return PaymentAttempt.objects.attach_provider_checkout(
         attempt,
         provider_checkout_id=provider_checkout_id,
@@ -1090,12 +1100,13 @@ def settle_payment_attempt(
     Finalize a paid provider checkout into Freewise's ledger.
     """
     attempt = (
-        PaymentAttempt.objects.select_for_update()
-        .select_related("contract", "milestone", "initiated_by")
+        PaymentAttempt._base_manager.select_for_update()
+        .select_related("contract", "milestone")
         .get(pk=attempt.pk)
     )
 
     if attempt.internal_status == PaymentAttempt.InternalStatus.SETTLED:
+        _sync_funding_state_after_settlement(milestone=attempt.milestone)
         return attempt
 
     normalized_provider_status = (provider_status or attempt.provider_status or "").strip().lower()
@@ -1110,7 +1121,7 @@ def settle_payment_attempt(
         currency=contract.currency or DEFAULT_CURRENCY,
     )
 
-    _deposit_tx = record_deposit(
+    deposit_tx = record_deposit(
         wallet=wallet,
         amount=attempt.amount,
         idempotency_key=f"{attempt.idempotency_key}:deposit",
@@ -1145,8 +1156,8 @@ def settle_payment_attempt(
         },
     )
 
-    attempt.provider_status = normalized_provider_status
-    attempt.provider_paid_at = attempt.provider_paid_at or timezone.now()
+    _sync_funding_state_after_settlement(milestone=milestone)
+
     if provider_snapshot is not None:
         attempt.provider_snapshot = provider_snapshot
     if webhook_payload is not None:
@@ -1413,3 +1424,216 @@ def process_payment_gateway_webhook(
         )
 
     return attempt
+
+@transaction.atomic
+def retry_payment_attempt_checkout(
+    *,
+    attempt: PaymentAttempt,
+    gateway: BasePaymentGateway,
+    idempotency_key: str,
+    initiated_by=None,
+    success_url: str,
+    failure_url: str,
+    webhook_url: str,
+) -> PaymentAttempt:
+    """
+    Retry a payment attempt safely.
+
+    Rules:
+    - if the milestone is already paid, do not create a new checkout
+    - if there is already an open checkout, reuse it
+    - only create a fresh checkout when the latest attempt is retryable
+    """
+    attempt = (
+        PaymentAttempt.objects.select_for_update()
+        .select_related("contract", "milestone")
+        .get(pk=attempt.pk)
+    )
+
+    latest = PaymentAttempt.objects.latest_for_milestone(attempt.milestone)
+
+    if latest and latest.internal_status == PaymentAttempt.InternalStatus.SETTLED:
+        raise ValidationError({"detail": _("This milestone is already paid.")})
+
+    if latest and not latest.is_final and latest.provider_checkout_id and latest.provider_checkout_url:
+        return latest
+
+    retryable_statuses = {
+        PaymentAttempt.InternalStatus.FAILED,
+        PaymentAttempt.InternalStatus.CANCELED,
+        PaymentAttempt.InternalStatus.EXPIRED,
+    }
+
+    if attempt.internal_status not in retryable_statuses:
+        raise ValidationError({"detail": _("This attempt cannot be retried.")})
+
+    retry_source = latest if latest and latest.is_final else attempt
+
+    retry_attempt = PaymentAttempt.objects.create_retry(
+        previous_attempt=retry_source,
+        idempotency_key=idempotency_key,
+        initiated_by=initiated_by,
+        success_url=success_url,
+        failure_url=failure_url,
+    )
+
+    description = (
+        f"Freewise — {retry_attempt.milestone.title} "
+        f"(Contract #{retry_attempt.contract_id})"
+    )
+
+    checkout = gateway.create_checkout(
+        amount=retry_attempt.amount,
+        currency=retry_attempt.currency,
+        success_url=success_url,
+        failure_url=failure_url,
+        webhook_url=webhook_url,
+        description=description,
+        metadata={
+            "attempt_id": str(retry_attempt.attempt_id),
+            "milestone_id": retry_attempt.milestone_id,
+            "contract_id": retry_attempt.contract_id,
+            "provider": retry_attempt.provider,
+            "retry_of_attempt_id": str(retry_source.attempt_id),
+        },
+        idempotency_key=idempotency_key,
+    )
+
+    retry_attempt = attach_checkout_to_payment_attempt(
+        attempt=retry_attempt,
+        provider_checkout=asdict(checkout),
+        provider_status=checkout.status,
+        expires_at=checkout.expires_at,
+    )
+
+    return retry_attempt
+
+@transaction.atomic
+def refresh_payment_attempt_from_provider(*, attempt: PaymentAttempt) -> PaymentAttempt:
+    """
+    Re-read the provider checkout state and update Freewise if the attempt is still open.
+
+    This is safe to call from read paths like:
+    - payment status endpoint
+    - milestone serializer
+    - contract detail refresh
+    """
+    attempt = (
+        PaymentAttempt.objects.select_for_update()
+        .select_related("contract", "milestone")
+        .get(pk=attempt.pk)
+    )
+
+    if attempt.is_final or not attempt.provider_checkout_id:
+        return attempt
+
+    try:
+        gateway = get_payment_gateway(attempt.provider)
+        snapshot = gateway.fetch_checkout(checkout_id=attempt.provider_checkout_id)
+    except Exception:
+        logger.exception(
+            "Failed to refresh payment attempt %s from provider",
+            attempt.attempt_id,
+        )
+        return attempt
+
+    normalized_status = gateway.normalize_status(snapshot.status)
+
+    if normalized_status == "paid":
+        return settle_payment_attempt(
+            attempt=attempt,
+            provider_snapshot=snapshot.raw,
+            provider_status="paid",
+        )
+
+    if normalized_status in {"failed", "canceled", "expired"}:
+        return fail_payment_attempt(
+            attempt=attempt,
+            reason=_("Provider checkout did not complete."),
+            provider_status=normalized_status,
+            provider_snapshot=snapshot.raw,
+        )
+
+    return PaymentAttempt.objects.reconcile_from_provider(
+        attempt,
+        provider_status=normalized_status,
+        provider_snapshot=snapshot.raw,
+    )
+
+@transaction.atomic
+def milestone_has_settled_or_paid_payment(*, milestone: Milestone) -> bool:
+    """
+    Hard stop for funding/re-funding.
+
+    Returns True if any payment attempt for this milestone is already:
+    - settled in Freewise
+    - paid by provider but not yet settled
+    - otherwise still blocking a new checkout
+    """
+    latest = (
+        PaymentAttempt.objects.for_milestone(milestone)
+        .order_by("-attempt_number", "-created_at")
+        .first()
+    )
+
+    if not latest:
+        return False
+
+    # If it's still open, refresh it first so provider-side expiry/paid states
+    # are not left stale in the DB.
+    if not latest.is_final:
+        latest = refresh_payment_attempt_from_provider(attempt=latest)
+
+    return latest.internal_status in {
+        PaymentAttempt.InternalStatus.SETTLED,
+        PaymentAttempt.InternalStatus.PAID_PROVIDER_NOT_SETTLED,
+        PaymentAttempt.InternalStatus.PROCESSING,
+        PaymentAttempt.InternalStatus.PENDING_PROVIDER,
+        PaymentAttempt.InternalStatus.REDIRECTED,
+        PaymentAttempt.InternalStatus.CREATED,
+        PaymentAttempt.InternalStatus.RECONCILED,
+    }
+
+
+@transaction.atomic
+def _sync_funding_state_after_settlement(*, milestone: Milestone) -> Milestone:
+    """
+    Bring milestone + contract into the correct funded state.
+
+    This is idempotent and safe to call more than once.
+    """
+    milestone = Milestone.objects.select_for_update().select_related("contract").get(
+        pk=milestone.pk
+    )
+    contract = milestone.contract
+    now = timezone.now()
+
+    if milestone.status == Milestone.Status.PENDING:
+        milestone.status = Milestone.Status.FUNDED
+        milestone.funded_at = milestone.funded_at or now
+        milestone.submitted_at = None
+        milestone.approved_at = None
+        milestone.released_at = None
+        milestone.refunded_at = None
+        milestone.disputed_at = None
+        milestone.full_clean()
+        milestone.save(
+            update_fields=[
+                "status",
+                "funded_at",
+                "submitted_at",
+                "approved_at",
+                "released_at",
+                "refunded_at",
+                "disputed_at",
+                "updated_at",
+            ]
+        )
+
+    if contract.status in {Contract.Status.DRAFT, Contract.Status.PENDING_FUNDING}:
+        contract.status = Contract.Status.IN_PROGRESS
+        contract.active_at = contract.active_at or now
+        contract.full_clean()
+        contract.save(update_fields=["status", "active_at", "updated_at"])
+
+    return milestone

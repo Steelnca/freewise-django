@@ -255,10 +255,9 @@ class ChargilyGateway(BasePaymentGateway):
             return False
 
         signature = (
-            headers.get(self.webhook_signature_header)
-            or headers.get(self.webhook_signature_header.lower())
-            or headers.get("X-Chargily-Signature")
-            or headers.get("x-chargily-signature")
+            headers.get("signature")
+            or headers.get("Signature")
+            or headers.get("SIGNATURE")
             or ""
         ).strip()
 

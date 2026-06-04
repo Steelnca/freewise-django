@@ -131,6 +131,7 @@ class ApproveMilestoneView(APIView):
                 review_note=serializer.validated_data.get("note", ""),
             )
         except Exception as exc:
+            raise exc
             return Response(
                 {"detail": str(exc)},
                 status=status.HTTP_400_BAD_REQUEST,

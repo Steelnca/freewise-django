@@ -59,7 +59,7 @@ class User(AbstractUser, LowercaseFieldsMixin):
         try:
             platform_user, created = cls.objects.get_or_create(
                 username=settings.FREEWISE_PLATFORM_USERNAME,
-                type=cls.UserType.PLATFORM,
+                type=cls.Type.PLATFORM,
                 defaults={
                     "email": settings.FREEWISE_PLATFORM_EMAIL,
                     "is_staff": False,

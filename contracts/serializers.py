@@ -8,11 +8,19 @@ All state changes happen in contracts/services.py.
 from rest_framework import serializers
 from decimal import Decimal
 
+from payments.models import PaymentAttempt
+from payments.services import refresh_payment_attempt_from_provider
+
 from .models import Contract, Milestone, ContractEvent
 
 
 class MilestoneSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display", read_only=True)
+    latest_payment_attempt_id = serializers.SerializerMethodField()
+    latest_payment_attempt_status = serializers.SerializerMethodField()
+    latest_payment_attempt_provider_status = serializers.SerializerMethodField()
+    latest_payment_attempt_checkout_url = serializers.SerializerMethodField()
+    latest_payment_attempt_retryable = serializers.SerializerMethodField()
 
     class Meta:
         model = Milestone
@@ -41,9 +49,55 @@ class MilestoneSerializer(serializers.ModelSerializer):
             "review_due_at",
             "created_at",
             "updated_at",
+            "latest_payment_attempt_id",
+            "latest_payment_attempt_status",
+            "latest_payment_attempt_provider_status",
+            "latest_payment_attempt_checkout_url",
+            "latest_payment_attempt_retryable",
         )
         read_only_fields = fields
 
+    def _latest_payment_attempt(self, obj):
+        cached = getattr(obj, "_latest_payment_attempt", None)
+        if cached is not None:
+            return cached
+
+        attempt = (
+            obj.payment_attempts.order_by("-attempt_number", "-created_at").first()
+        )
+
+        if attempt and not attempt.is_final:
+            attempt = refresh_payment_attempt_from_provider(attempt=attempt)
+
+        obj._latest_payment_attempt = attempt
+        return attempt
+
+    def get_latest_payment_attempt_id(self, obj):
+        attempt = self._latest_payment_attempt(obj)
+        return str(attempt.attempt_id) if attempt else None
+
+    def get_latest_payment_attempt_status(self, obj):
+        attempt = self._latest_payment_attempt(obj)
+        return attempt.internal_status if attempt else None
+
+    def get_latest_payment_attempt_provider_status(self, obj):
+        attempt = self._latest_payment_attempt(obj)
+        return attempt.provider_status if attempt else None
+
+    def get_latest_payment_attempt_checkout_url(self, obj):
+        attempt = self._latest_payment_attempt(obj)
+        return attempt.provider_checkout_url if attempt else None
+
+    def get_latest_payment_attempt_retryable(self, obj):
+        attempt = self._latest_payment_attempt(obj)
+        if not attempt:
+            return False
+
+        return attempt.internal_status in {
+            PaymentAttempt.InternalStatus.FAILED,
+            PaymentAttempt.InternalStatus.CANCELED,
+            PaymentAttempt.InternalStatus.EXPIRED,
+        }
 
 class ContractSerializer(serializers.ModelSerializer):
     client_username = serializers.CharField(source="client.account.user.username", read_only=True)

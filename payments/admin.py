@@ -9,7 +9,7 @@ Moderator actions are limited to operational safety controls.
 from django.contrib import admin
 from django.utils.translation import gettext_lazy as _
 
-from .models import Wallet, WalletTransaction, EscrowHold, Payout, WebhookLog
+from .models import Wallet, WalletTransaction, EscrowHold, Payout, WebhookLog, PaymentAttempt
 
 
 @admin.register(Wallet)
@@ -94,4 +94,15 @@ class WebhookLogAdmin(admin.ModelAdmin):
         return False
 
     def has_delete_permission(self, request, obj=None):
-        return True # ! False CHANGE THAT TO FALSE LATER
+        return False
+
+@admin.register(PaymentAttempt)
+class PaymentAttemptAdmin(admin.ModelAdmin):
+
+    # readonly_fields = [f.name for f in PaymentAttempt._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
