@@ -42,6 +42,7 @@ class MilestoneInline(admin.TabularInline):
 class ContractAdmin(admin.ModelAdmin):
     list_display = (
         "id",
+        "public_id",
         "display_name",
         "source_type",
         "client",
@@ -62,6 +63,8 @@ class ContractAdmin(admin.ModelAdmin):
     )
     ordering = ("-created_at",)
     readonly_fields = (
+        "id",
+        "public_id",
         "created_at",
         "updated_at",
         "active_at",
@@ -74,6 +77,7 @@ class ContractAdmin(admin.ModelAdmin):
     inlines = [MilestoneInline]
 
     fieldsets = (
+        (_("Identifiers"), {"fields": ("public_id",)}),
         (_("Source"), {"fields": ("source_type", "job", "proposal", "title")}),
         (_("Parties"), {"fields": ("client", "freelancer")}),
         (_("Terms"), {"fields": ("currency", "agreed_price", "deadline")}),
@@ -105,6 +109,7 @@ class ContractAdmin(admin.ModelAdmin):
 class MilestoneAdmin(admin.ModelAdmin):
     list_display = (
         "id",
+        "public_id",
         "title",
         "contract",
         "amount",
@@ -123,6 +128,8 @@ class MilestoneAdmin(admin.ModelAdmin):
     )
     ordering = ("contract", "order", "-created_at")
     readonly_fields = (
+        "id",
+        "public_id",
         "created_at",
         "updated_at",
         "funded_at",
@@ -134,6 +141,7 @@ class MilestoneAdmin(admin.ModelAdmin):
         "review_due_at",
     )
     fieldsets = (
+        (_("Identifiers"), {"fields": ("public_id",)}),
         (_("Details"), {"fields": ("contract", "title", "description", "currency", "amount", "due_date", "order")}),
         (_("Status"), {"fields": ("status", "submission_note", "review_note", "dispute_reason")}),
         (

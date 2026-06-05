@@ -26,6 +26,7 @@ class MilestoneSerializer(serializers.ModelSerializer):
         model = Milestone
         fields = (
             "id",
+            "public_id",
             "title",
             "description",
             "currency",
@@ -115,18 +116,19 @@ class ContractSerializer(serializers.ModelSerializer):
     milestone_total = serializers.SerializerMethodField()
     remaining_amount = serializers.SerializerMethodField()
     funding_progress = serializers.SerializerMethodField()
-    first_pending_milestone_id = serializers.SerializerMethodField()
-    first_funded_milestone_id = serializers.SerializerMethodField()
+    first_pending_milestone_public_id = serializers.SerializerMethodField()
+    first_funded_milestone_public_id = serializers.SerializerMethodField()
     has_suspension = serializers.SerializerMethodField()
     is_funding_locked = serializers.SerializerMethodField()
     is_finished = serializers.SerializerMethodField()
     next_action = serializers.SerializerMethodField()
-    next_action_milestone_id = serializers.SerializerMethodField()
+    next_action_milestone_public_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Contract
         fields = (
             "id",
+            "public_id",
             "source_type",
             "source_type_label",
             "job",
@@ -149,13 +151,13 @@ class ContractSerializer(serializers.ModelSerializer):
             "milestone_total",
             "remaining_amount",
             "funding_progress",
-            "first_pending_milestone_id",
-            "first_funded_milestone_id",
+            "first_pending_milestone_public_id",
+            "first_funded_milestone_public_id",
             "has_suspension",
             "is_funding_locked",
             "is_finished",
             "next_action",
-            "next_action_milestone_id",
+            "next_action_milestone_public_id",
             "active_at",
             "completed_at",
             "cancelled_at",
@@ -205,23 +207,23 @@ class ContractSerializer(serializers.ModelSerializer):
             return (total / obj.agreed_price) * 100
         return 0
 
-    def get_first_pending_milestone_id(self, obj):
+    def get_first_pending_milestone_public_id(self, obj):
         milestone = (
             obj.milestones
             .filter(status=Milestone.Status.PENDING)
             .order_by("order", "created_at")
             .first()
         )
-        return milestone.id if milestone else None
+        return milestone.public_id if milestone else None
 
-    def get_first_funded_milestone_id(self, obj):
+    def get_first_funded_milestone_public_id(self, obj):
         milestone = (
             obj.milestones
             .filter(status=Milestone.Status.FUNDED)
             .order_by("order", "created_at")
             .first()
         )
-        return milestone.id if milestone else None
+        return milestone.public_id if milestone else None
 
     def get_has_suspension(self, obj):
         if obj.status == Contract.Status.SUSPENDED:
@@ -293,24 +295,24 @@ class ContractSerializer(serializers.ModelSerializer):
 
         return "no_access"
 
-    def get_next_action_milestone_id(self, obj):
+    def get_next_action_milestone_public_id(self, obj):
         ordered = obj.milestones.order_by("order", "created_at")
 
         revision = ordered.filter(status=Milestone.Status.REVISION_REQUESTED).first()
         if revision:
-            return revision.id
+            return revision.public_id
 
         submitted = ordered.filter(status=Milestone.Status.SUBMITTED).first()
         if submitted:
-            return submitted.id
+            return submitted.public_id
 
         funded = ordered.filter(status=Milestone.Status.FUNDED).first()
         if funded:
-            return funded.id
+            return funded.public_id
 
         pending = ordered.filter(status=Milestone.Status.PENDING).first()
         if pending:
-            return pending.id
+            return pending.public_id
 
         return None
 

@@ -46,6 +46,8 @@ class ContractDetailView(generics.RetrieveAPIView):
     """
     permission_classes = [IsAuthenticated]
     serializer_class = ContractSerializer
+    lookup_field = "public_id"
+    lookup_url_kwarg = "public_id"
 
     def get_queryset(self):
         return get_party_contract_queryset(self.request.user)
@@ -58,8 +60,8 @@ class SubmitMilestoneView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, pk):
-        milestone = get_object_or_404(Milestone.objects.select_related("contract"), pk=pk)
+    def post(self, request, public_id):
+        milestone = get_object_or_404(Milestone.objects.select_related("contract"), public_id=public_id)
 
         try:
             ensure_party_access(milestone.contract, request.user)
@@ -88,8 +90,8 @@ class RequestRevisionView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, pk):
-        milestone = get_object_or_404(Milestone.objects.select_related("contract"), pk=pk)
+    def post(self, request, public_id):
+        milestone = get_object_or_404(Milestone.objects.select_related("contract"), public_id=public_id)
 
         try:
             ensure_party_access(milestone.contract, request.user)
@@ -117,8 +119,8 @@ class ApproveMilestoneView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, pk):
-        milestone = get_object_or_404(Milestone.objects.select_related("contract"), pk=pk)
+    def post(self, request, public_id):
+        milestone = get_object_or_404(Milestone.objects.select_related("contract"), public_id=public_id)
 
         try:
             ensure_party_access(milestone.contract, request.user)
@@ -147,8 +149,8 @@ class DisputeMilestoneView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, pk):
-        milestone = get_object_or_404(Milestone.objects.select_related("contract"), pk=pk)
+    def post(self, request, public_id):
+        milestone = get_object_or_404(Milestone.objects.select_related("contract"), public_id=public_id)
 
         try:
             ensure_party_access(milestone.contract, request.user)
@@ -176,8 +178,8 @@ class CancelContractView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, pk):
-        contract = get_object_or_404(Contract, pk=pk)
+    def post(self, request, public_id):
+        contract = get_object_or_404(Contract, public_id=public_id)
 
         try:
             ensure_party_access(contract, request.user)
@@ -195,8 +197,8 @@ class CancelContractView(APIView):
 class CreateMilestoneView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, pk):
-        contract = get_object_or_404(Contract, pk=pk)
+    def post(self, request, public_id):
+        contract = get_object_or_404(Contract, public_id=public_id)
         ensure_party_access(contract, request.user)
 
         serializer = MilestoneCreateSerializer(data=request.data)
@@ -216,9 +218,11 @@ class CreateMilestoneView(APIView):
 class ContractEventsView(generics.ListAPIView):
     serializer_class = ContractEventSerializer
     permission_classes = [IsAuthenticated]
+    lookup_field = "public_id"
+    lookup_url_kwarg = "public_id"
 
     def get_queryset(self):
-        contract = get_object_or_404(Contract, pk=self.kwargs["pk"])
+        contract = get_object_or_404(Contract, public_id=self.kwargs["public_id"])
         ensure_party_access(contract, self.request.user)
         return contract.events.order_by("-created_at")
 
@@ -226,12 +230,12 @@ class ContractEventsView(generics.ListAPIView):
 class MilestoneDeliverableRedirectView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, pk):
+    def get(self, request, public_id):
+        print("#########"*20)
         milestone = get_object_or_404(
             Milestone.objects.select_related("contract"),
-            pk=pk,
+            public_id=public_id,
         )
-
         ensure_milestone_access(milestone, request.user)
 
         if not milestone.submission_link:

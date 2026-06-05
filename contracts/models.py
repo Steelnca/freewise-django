@@ -12,9 +12,8 @@ from django.db import models
 from django.db.models import Sum
 from django.utils.translation import gettext_lazy as _
 
-
-DEFAULT_CURRENCY = "DZD"
-
+from payments.constants import DEFAULT_CURRENCY
+from core.utils import _generate_prefixed_public_id
 
 class Contract(models.Model):
     """
@@ -44,6 +43,15 @@ class Contract(models.Model):
         db_index=True,
         verbose_name=_("source type"),
         help_text=_("Where this contract started."),
+    )
+
+    public_id = models.CharField(
+        max_length=16,
+        unique=True,
+        db_index=True,
+        editable=False,
+        verbose_name=_("public id"),
+        help_text=_("Public contract ID used in URLs and sharing."),
     )
 
     job = models.OneToOneField(
@@ -189,22 +197,6 @@ class Contract(models.Model):
     def __str__(self) -> str:
         return self.display_name
 
-    @property
-    def display_name(self) -> str:
-        """
-        A stable human-readable label for UI and admin.
-        """
-        if self.title:
-            return self.title
-
-        if self.job_id and hasattr(self.job, "title"):
-            return self.job.title
-
-        if self.proposal_id and hasattr(self.proposal, "job") and self.proposal.job_id:
-            return getattr(self.proposal.job, "title", f"Contract #{self.pk}")
-
-        return f"Contract #{self.pk}"
-
     def clean(self):
         super().clean()
 
@@ -239,6 +231,27 @@ class Contract(models.Model):
                         )
                     }
                 )
+
+    def save(self, *args, **kwargs):
+        if not self.public_id:
+            self.public_id = _generate_prefixed_public_id("FWC", Contract)
+        super().save(*args, **kwargs)
+
+    @property
+    def display_name(self) -> str:
+        """
+        A stable human-readable label for UI and admin.
+        """
+        if self.title:
+            return self.title
+
+        if self.job_id and hasattr(self.job, "title"):
+            return self.job.title
+
+        if self.proposal_id and hasattr(self.proposal, "job") and self.proposal.job_id:
+            return getattr(self.proposal.job, "title", f"Contract #{self.pk}")
+
+        return f"Contract #{self.pk}"
 
     @property
     def total_amount(self) -> Decimal:
@@ -298,6 +311,15 @@ class Milestone(models.Model):
         related_name="milestones",
         verbose_name=_("contract"),
         help_text=_("The contract this milestone belongs to."),
+    )
+
+    public_id = models.CharField(
+        max_length=16,
+        unique=True,
+        db_index=True,
+        editable=False,
+        verbose_name=_("public id"),
+        help_text=_("Public milestone ID used in URLs and sharing."),
     )
 
     title = models.CharField(
@@ -485,6 +507,11 @@ class Milestone(models.Model):
             raise ValidationError(
                 {"currency": _("Milestone currency must match the contract currency.")}
             )
+
+    def save(self, *args, **kwargs):
+        if not self.public_id:
+            self.public_id = _generate_prefixed_public_id("FWM", Milestone)
+        super().save(*args, **kwargs)
 
 
 class ContractEvent(models.Model):
