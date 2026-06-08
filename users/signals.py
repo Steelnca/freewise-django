@@ -5,10 +5,9 @@ from django.contrib.auth import get_user_model
 
 User = get_user_model()
 
-
 @receiver(post_save, sender=User)
 def create_account(sender, instance, created, **kwargs):
     """Auto-create an Account whenever a new User is registered."""
-    if created:
+    if created and instance.type == User.Type.REGULAR:
         from accounts.models import Account
         Account.objects.get_or_create(user=instance)

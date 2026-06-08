@@ -25,7 +25,6 @@ class MilestoneSerializer(serializers.ModelSerializer):
     class Meta:
         model = Milestone
         fields = (
-            "id",
             "public_id",
             "title",
             "description",
@@ -38,6 +37,7 @@ class MilestoneSerializer(serializers.ModelSerializer):
             "submission_note",
             "submission_link",
             "review_note",
+            "revision_note",
             "dispute_reason",
             "submitted_at",
             "approved_at",
@@ -127,7 +127,6 @@ class ContractSerializer(serializers.ModelSerializer):
     class Meta:
         model = Contract
         fields = (
-            "id",
             "public_id",
             "source_type",
             "source_type_label",
@@ -317,11 +316,10 @@ class ContractSerializer(serializers.ModelSerializer):
         return None
 
 class MilestoneActionSerializer(serializers.Serializer):
-    note = serializers.CharField(required=False, allow_blank=True, default="")
+    revision_note = serializers.CharField(required=False, allow_blank=True, default="")
     revision_scope = serializers.CharField(required=False, allow_blank=True, default="")
     submission_link = serializers.URLField(required=False, allow_blank=True, default="")
     reason = serializers.CharField(required=False, allow_blank=True, default="")
-    fee_amount = serializers.DecimalField(required=False, max_digits=14, decimal_places=2, default=0)
 
 class MilestoneCreateSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=255)

@@ -91,6 +91,7 @@ class RequestRevisionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, public_id):
+        print("#########"*20)
         milestone = get_object_or_404(Milestone.objects.select_related("contract"), public_id=public_id)
 
         try:
@@ -101,7 +102,7 @@ class RequestRevisionView(APIView):
             updated = request_revision(
                 milestone=milestone,
                 user=request.user,
-                review_note=serializer.validated_data.get("note", ""),
+                revision_note=serializer.validated_data.get("revision_note", ""),
             )
         except Exception as exc:
             return Response(

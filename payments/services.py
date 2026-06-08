@@ -634,7 +634,7 @@ def release_escrow_hold_to_wallet(
     recipient_wallet: Wallet,
     idempotency_key: str,
     initiated_by: Optional[User] = None,
-    amount: Optional[Decimal | str | int | float] = None,
+    release_amount: Optional[Decimal | str | int | float] = None,
     fee_wallet: Optional[Wallet] = None,
     fee_amount: Decimal | str | int | float = Decimal("0.00"),
     reference_type: str = "contract",
@@ -689,7 +689,7 @@ def release_escrow_hold_to_wallet(
     if hold.status not in {EscrowHold.Status.ACTIVE, EscrowHold.Status.DISPUTED}:
         raise EscrowHoldError(_("This escrow hold cannot be released."))
 
-    release_amount = normalize_money(amount or hold.amount)
+    release_amount = normalize_money(release_amount)
     fee_amount = normalize_money(fee_amount)
     validate_positive_money(release_amount)
 
@@ -706,6 +706,17 @@ def release_escrow_hold_to_wallet(
         raise EscrowHoldError(
             _("Release amount plus fee cannot exceed the escrow hold amount.")
         )
+
+    if total_outgoing <= Decimal("0.00"):
+        raise ValidationError(
+            {"release_amount": _("Total outgoing amount must be greater than zero.")}
+        )
+
+    if fee_amount > 0 and not locked_fee_wallet:
+        raise ValidationError(_("A fee wallet is required when fee_amount is greater than zero."))
+
+    if source_wallet.pk == recipient_wallet.pk:
+        raise ValidationError(_("Source and recipient wallets cannot be the same."))
 
     if source_wallet.currency != recipient_wallet.currency:
         raise ValidationError(_("Source and recipient wallets must use the same currency."))
@@ -998,7 +1009,7 @@ def get_or_create_platform_wallet(currency: str = DEFAULT_CURRENCY) -> Wallet:
 # PaymentAttempt helpers
 # -----------------------------------------------------------------------------
 def payment_contract_reference_for_milestone(milestone: Milestone) -> str:
-    return f"contract:{milestone.contract_id}:milestone:{milestone.id}"
+    return f"contract:{milestone.contract.public_id}:milestone:{milestone.public_id}"
 
 
 @transaction.atomic
@@ -1035,8 +1046,8 @@ def create_payment_attempt_for_milestone(
         failure_url=failure_url,
         provider_snapshot=json_safe_dict(
             {
-                "milestone_id": milestone.id,
-                "contract_id": contract.id,
+                "milestone_public_id": milestone.public_id,
+                "contract_public_id": contract.public_id,
                 "amount": milestone.amount,
                 "currency": currency,
             }
@@ -1129,12 +1140,12 @@ def settle_payment_attempt(
         provider_name=attempt.provider,
         provider_reference=attempt.provider_checkout_id,
         reference_type="milestone",
-        reference_id=str(milestone.id),
+        reference_id=str(milestone.public_id),
         description=_("Provider payment settled into Freewise wallet."),
         metadata={
             "attempt_id": str(attempt.attempt_id),
-            "contract_id": contract.id,
-            "milestone_id": milestone.id,
+            "contract_public_id": contract.public_id,
+            "milestone_public_id": milestone.public_id,
             "provider_checkout_id": attempt.provider_checkout_id,
         },
     )
@@ -1146,12 +1157,12 @@ def settle_payment_attempt(
         idempotency_key=f"{attempt.idempotency_key}:escrow",
         initiated_by=initiated_by or attempt.initiated_by,
         reference_type="milestone",
-        reference_id=str(milestone.id),
+        reference_id=str(milestone.public_id),
         description=_("Funds moved into escrow after provider payment."),
         metadata={
             "attempt_id": str(attempt.attempt_id),
-            "contract_id": contract.id,
-            "milestone_id": milestone.id,
+            "contract_public_id": contract.public_id,
+            "milestone_public_id": milestone.public_id,
             "provider_checkout_id": attempt.provider_checkout_id,
         },
     )
@@ -1330,10 +1341,8 @@ def find_payment_attempt_for_gateway_event(
         if attempt:
             return attempt
 
-    milestone_id = _deep_find_first_string(
-        payload,
-        ("milestone_id", "milestoneId"),
-    )
+    milestone_id = _deep_find_first_string(payload, ("milestone_id", "milestoneId"))
+
     if milestone_id:
         attempt = (
             PaymentAttempt.objects.select_for_update()
@@ -1440,73 +1449,107 @@ def retry_payment_attempt_checkout(
     Retry a payment attempt safely.
 
     Rules:
-    - if the milestone is already paid, do not create a new checkout
-    - if there is already an open checkout, reuse it
-    - only create a fresh checkout when the latest attempt is retryable
+    - settled milestone: block
+    - still-open attempt with live checkout: reuse it
+    - final failed/canceled/expired attempt: create a new attempt row
     """
-    attempt = (
-        PaymentAttempt.objects.select_for_update()
+    current = (
+        PaymentAttempt._base_manager.select_for_update()
         .select_related("contract", "milestone")
         .get(pk=attempt.pk)
     )
 
-    latest = PaymentAttempt.objects.latest_for_milestone(attempt.milestone)
+    latest = PaymentAttempt.objects.latest_for_milestone(current.milestone)
 
-    if latest and latest.internal_status == PaymentAttempt.InternalStatus.SETTLED:
-        raise ValidationError({"detail": _("This milestone is already paid.")})
+    if latest:
+        # Refresh stale open attempts before deciding whether to reuse or retry.
+        if not latest.is_final:
+            latest = refresh_payment_attempt_from_provider(attempt=latest)
 
-    if latest and not latest.is_final and latest.provider_checkout_id and latest.provider_checkout_url:
-        return latest
+        latest = (
+            PaymentAttempt._base_manager.select_for_update()
+            .select_related("contract", "milestone")
+            .get(pk=latest.pk)
+        )
 
-    retryable_statuses = {
-        PaymentAttempt.InternalStatus.FAILED,
-        PaymentAttempt.InternalStatus.CANCELED,
-        PaymentAttempt.InternalStatus.EXPIRED,
-    }
+        if latest.internal_status == PaymentAttempt.InternalStatus.SETTLED:
+            raise ValidationError({"detail": _("This milestone is already paid.")})
 
-    if attempt.internal_status not in retryable_statuses:
-        raise ValidationError({"detail": _("This attempt cannot be retried.")})
+        if not latest.is_final:
+            # Existing open checkout: keep the same attempt row.
+            if latest.provider_checkout_id and latest.provider_checkout_url:
+                return latest
 
-    retry_source = latest if latest and latest.is_final else attempt
+            # Open attempt exists but checkout metadata is missing.
+            target_attempt = latest
+        else:
+            if latest.internal_status not in {
+                PaymentAttempt.InternalStatus.FAILED,
+                PaymentAttempt.InternalStatus.CANCELED,
+                PaymentAttempt.InternalStatus.EXPIRED,
+            }:
+                raise ValidationError(
+                    {"detail": _("This attempt cannot be retried.")}
+                )
 
-    retry_attempt = PaymentAttempt.objects.create_retry(
-        previous_attempt=retry_source,
-        idempotency_key=idempotency_key,
-        initiated_by=initiated_by,
-        success_url=success_url,
-        failure_url=failure_url,
-    )
+            # Final failed/canceled/expired attempt: create a new row.
+            target_attempt = PaymentAttempt.objects.create_retry(
+                previous_attempt=latest,
+                idempotency_key=idempotency_key,
+                initiated_by=initiated_by,
+                success_url=success_url,
+                failure_url=failure_url,
+            )
+    else:
+        # No prior attempt found for the milestone.
+        # For safety, create a fresh row rather than mutating anything.
+        target_attempt = PaymentAttempt.objects.create_attempt(
+            milestone=current.milestone,
+            idempotency_key=idempotency_key,
+            initiated_by=initiated_by,
+            provider=gateway.provider_name,
+            success_url=success_url,
+            failure_url=failure_url,
+            retry_of=None,
+            provider_snapshot={
+                "milestone_public_id": current.milestone.public_id,
+                "contract_public_id": current.contract.public_id,
+                "provider": gateway.provider_name,
+            },
+        )
 
     description = (
-        f"Freewise — {retry_attempt.milestone.title} "
-        f"(Contract #{retry_attempt.contract_id})"
+        f"Freewise — {target_attempt.milestone.title} "
+        f"(Contract #{target_attempt.contract.public_id})"
     )
 
     checkout = gateway.create_checkout(
-        amount=retry_attempt.amount,
-        currency=retry_attempt.currency,
+        amount=target_attempt.amount,
+        currency=target_attempt.currency,
         success_url=success_url,
         failure_url=failure_url,
         webhook_url=webhook_url,
         description=description,
         metadata={
-            "attempt_id": str(retry_attempt.attempt_id),
-            "milestone_id": retry_attempt.milestone_id,
-            "contract_id": retry_attempt.contract_id,
-            "provider": retry_attempt.provider,
-            "retry_of_attempt_id": str(retry_source.attempt_id),
+            "attempt_id": str(target_attempt.attempt_id),
+            "milestone_public_id": target_attempt.milestone.public_id,
+            "contract_public_id": target_attempt.contract.public_id,
+            "provider": target_attempt.provider,
+            "retry_of_attempt_id": str(target_attempt.retry_of.attempt_id)
+            if target_attempt.retry_of_id
+            else "",
         },
         idempotency_key=idempotency_key,
     )
 
-    retry_attempt = attach_checkout_to_payment_attempt(
-        attempt=retry_attempt,
+    target_attempt = attach_checkout_to_payment_attempt(
+        attempt=target_attempt,
         provider_checkout=asdict(checkout),
         provider_status=checkout.status,
         expires_at=checkout.expires_at,
     )
 
-    return retry_attempt
+    return target_attempt
 
 @transaction.atomic
 def refresh_payment_attempt_from_provider(*, attempt: PaymentAttempt) -> PaymentAttempt:

@@ -6,6 +6,7 @@ from typing import Any, Optional
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models, transaction
 from django.utils import timezone
+from django.utils.translation import gettext as _
 
 from core.utils import json_safe_dict
 
@@ -447,12 +448,20 @@ class PaymentAttemptManager(models.Manager.from_queryset(PaymentAttemptQuerySet)
     ):
         """
         Create a new attempt chained from a previous one.
+
+        Only final attempts should be retried.
+        Open attempts must be reused, not duplicated.
         """
         previous_attempt = (
             self.model._base_manager.select_for_update()
             .select_related("contract", "milestone")
             .get(pk=previous_attempt.pk)
         )
+
+        if not previous_attempt.is_final:
+            raise ValidationError(
+                {"previous_attempt": _("Only final attempts can be retried.")}
+            )
 
         return self.create_attempt(
             milestone=previous_attempt.milestone,

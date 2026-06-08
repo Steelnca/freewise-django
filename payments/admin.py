@@ -99,7 +99,7 @@ class WebhookLogAdmin(admin.ModelAdmin):
 @admin.register(PaymentAttempt)
 class PaymentAttemptAdmin(admin.ModelAdmin):
 
-    # readonly_fields = [f.name for f in PaymentAttempt._meta.fields]
+    readonly_fields = [f.name for f in PaymentAttempt._meta.fields]
 
     def has_add_permission(self, request):
         return False

@@ -30,6 +30,7 @@ from payments.services import (
     hold_funds_for_escrow,
     release_escrow_hold_to_wallet,
     refund_escrow_hold,
+    normalize_money,
 )
 
 from .models import Contract, Milestone, ContractEvent
@@ -44,7 +45,7 @@ def contract_reference_for_milestone(milestone: Milestone) -> str:
     """
     Stable reference string used by payments. Keep it predictable.
     """
-    return f"contract:{milestone.contract_id}:milestone:{milestone.id}"
+    return f"contract:{milestone.contract.public_id}:milestone:{milestone.public_id}"
 
 
 def get_user_contracts_queryset(user):
@@ -211,7 +212,7 @@ def fund_milestone_from_payment(
         provider_name=provider_name,
         provider_reference=provider_reference,
         reference_type="milestone",
-        reference_id=str(milestone.pk),
+        reference_id=str(milestone.public_id),
         description=_("Funds moved into escrow for milestone funding."),
         metadata=metadata or {},
     )
@@ -230,7 +231,7 @@ def fund_milestone_from_payment(
         contract=contract,
         event_type=ContractEvent.ContractEventType.MILESTONE_FUNDED,
         actor=initiated_by,
-        metadata={"milestone_id": milestone.id},
+        metadata={"milestone_public_id": milestone.public_id},
     )
 
     if contract.status in {Contract.Status.DRAFT, Contract.Status.PENDING_FUNDING}:
@@ -290,7 +291,7 @@ def submit_milestone(
         contract=milestone.contract,
         event_type=ContractEvent.ContractEventType.MILESTONE_SUBMITTED,
         actor=user,
-        metadata={"milestone_id": milestone.id},
+        metadata={"milestone_public_id": milestone.public_id},
     )
 
     return milestone
@@ -301,7 +302,7 @@ def request_revision(
     *,
     milestone: Milestone,
     user,
-    review_note: str = "",
+    revision_note: str = "",
     revision_scope: str = "",
 ) -> Milestone:
     """
@@ -328,7 +329,7 @@ def request_revision(
         raise ValidationError({"status": _("Only submitted milestones can be revised.")})
 
     milestone.status = Milestone.Status.REVISION_REQUESTED
-    milestone.review_note = review_note or milestone.review_note
+    milestone.revision_note = revision_note or milestone.revision_note
     milestone.revision_scope = revision_scope or milestone.revision_scope
     milestone.revision_requested_at = timezone.now()
     milestone.full_clean()
@@ -339,9 +340,9 @@ def request_revision(
         event_type=ContractEvent.ContractEventType.MILESTONE_REVISION_REQUESTED,
         actor=user,
         metadata={
-            "milestone_id": milestone.pk,
+            "milestone_public_id": milestone.public_id,
             "revision_scope": revision_scope,
-            "review_note": review_note,
+            "revision_note": revision_note,
         },
     )
 
@@ -403,23 +404,26 @@ def approve_milestone(
         currency=contract.currency or PAYMENTS_DEFAULT_CURRENCY,
     )
     fee_wallet = get_or_create_platform_wallet(contract.currency or PAYMENTS_DEFAULT_CURRENCY)
-    fee_amount = calculate_platform_fee(milestone.amount)
+
+    gross_amount = normalize_money(milestone.amount)
+    platform_fee_amount = calculate_platform_fee(gross_amount)
+    net_amount = normalize_money(gross_amount - platform_fee_amount)
 
     release_escrow_hold_to_wallet(
         hold=hold,
         recipient_wallet=freelancer_wallet,
-        idempotency_key=f"milestone:{milestone.pk}:approve",
+        idempotency_key=f"milestone:{milestone.public_id}:approve",
         initiated_by=user,
-        amount=milestone.amount,
+        release_amount=net_amount,
         fee_wallet=fee_wallet,
-        fee_amount=fee_amount,
+        fee_amount=platform_fee_amount,
         reference_type="milestone",
-        reference_id=str(milestone.pk),
-        description=f"Milestone #{milestone.pk} approved.",
+        reference_id=str(milestone.public_id),
+        description=f"Milestone #{milestone.public_id} approved.",
         metadata={
-            "contract_id": contract.id,
-            "milestone_id": milestone.pk,
-            "fee_amount": str(fee_amount),
+            "contract_public_id": milestone.contract.public_id,
+            "milestone_public_id": milestone.public_id,
+            "fee_amount": str(platform_fee_amount),
         },
     )
 
@@ -445,9 +449,9 @@ def approve_milestone(
         actor=user,
         event_type=ContractEvent.ContractEventType.MILESTONE_APPROVED,
         metadata={
-            "milestone_id": milestone.pk,
+            "milestone_public_id": milestone.public_id,
             "amount": str(milestone.amount),
-            "fee_amount": str(fee_amount),
+            "fee_amount": str(platform_fee_amount),
         },
     )
 
@@ -507,7 +511,7 @@ def open_dispute(
         contract=milestone.contract,
         event_type=ContractEvent.ContractEventType.MILESTONE_DISPUTED,
         actor=user,
-        metadata={"milestone_id": milestone.id},
+        metadata={"milestone_public_id": milestone.public_id},
     )
 
     _set_contract_state(
@@ -543,15 +547,15 @@ def refund_milestone(
 
     refund_escrow_hold(
         hold=hold,
-        idempotency_key=f"milestone:{milestone.pk}:refund",
+        idempotency_key=f"milestone:{milestone.public_id}:refund",
         initiated_by=user,
         amount=milestone.amount,
         reference_type="milestone",
-        reference_id=str(milestone.pk),
+        reference_id=str(milestone.public_id),
         description=refund_note or _("Milestone refunded."),
         metadata={
-            "contract_id": milestone.contract_id,
-            "milestone_id": milestone.pk,
+            "contract_public_id": milestone.contract.public_id,
+            "milestone_public_id": milestone.public_id,
         },
     )
 
@@ -564,7 +568,7 @@ def refund_milestone(
         contract=milestone.contract,
         event_type=ContractEvent.ContractEventType.MILESTONE_REFUNDED,
         actor=user,
-        metadata={"milestone_id": milestone.id, "refund_note": refund_note},
+        metadata={"milestone_public_id": milestone.public_id, "refund_note": refund_note},
     )
 
     sync_contract_completion(milestone.contract)
@@ -613,15 +617,15 @@ def cancel_contract(*, contract: Contract, user, reason: str = "") -> Contract:
             if hold and hold.status in {EscrowHold.Status.ACTIVE, EscrowHold.Status.DISPUTED}:
                 refund_escrow_hold(
                     hold=hold,
-                    idempotency_key=f"milestone:{milestone.pk}:cancel-refund",
+                    idempotency_key=f"milestone:{milestone.public_id}:cancel-refund",
                     initiated_by=user,
                     amount=milestone.amount,
                     reference_type="milestone",
-                    reference_id=str(milestone.pk),
+                    reference_id=str(milestone.public_id),
                     description=reason or _("Contract withdrawn and milestone refunded."),
                     metadata={
-                        "contract_id": contract.id,
-                        "milestone_id": milestone.pk,
+                        "contract_public_id": milestone.contract.public_id,
+                        "milestone_public_id": milestone.public_id,
                         "reason": reason,
                     },
                 )
@@ -635,7 +639,7 @@ def cancel_contract(*, contract: Contract, user, reason: str = "") -> Contract:
                 contract=contract,
                 event_type=ContractEvent.ContractEventType.MILESTONE_REFUNDED,
                 actor=user,
-                metadata={"milestone_id": milestone.id, "reason": reason},
+                metadata={"milestone_public_id": milestone.public_id, "reason": reason},
             )
 
         _set_contract_state(
@@ -703,7 +707,7 @@ def create_milestone(*, contract, user, title, description, amount, due_date, or
         contract=contract,
         event_type=ContractEvent.ContractEventType.MILESTONE_CREATED,
         actor=user,
-        metadata={"milestone_id": milestone.id},
+        metadata={"milestone_public_id": milestone.public_id},
     )
 
     return milestone
@@ -816,15 +820,15 @@ def resolve_dispute_to_freelancer(*, milestone: Milestone, user, note: str = "")
     release_escrow_hold_to_wallet(
         hold=hold,
         recipient_wallet=recipient_wallet,
-        idempotency_key=f"milestone:{milestone.pk}:dispute:release",
+        idempotency_key=f"milestone:{milestone.public_id}:dispute:release",
         initiated_by=user,
         amount=milestone.amount,
         reference_type="milestone",
-        reference_id=str(milestone.pk),
+        reference_id=str(milestone.public_id),
         description=note or _("Dispute resolved in favor of the freelancer."),
         metadata={
-            "contract_id": milestone.contract_id,
-            "milestone_id": milestone.pk,
+            "contract_public_id": milestone.contract.public_id,
+            "milestone_public_id": milestone.public_id,
             "resolution": "freelancer",
         },
     )
@@ -841,7 +845,7 @@ def resolve_dispute_to_freelancer(*, milestone: Milestone, user, note: str = "")
         contract=milestone.contract,
         event_type=ContractEvent.ContractEventType.MILESTONE_DISPUTE_RESOLVED_TO_FREELANCER,
         actor=user,
-        metadata={"milestone_id": milestone.pk, "note": note},
+        metadata={"milestone_public_id": milestone.public_id, "note": note},
     )
 
     return milestone
@@ -870,15 +874,15 @@ def resolve_dispute_to_client(*, milestone: Milestone, user, note: str = "") -> 
 
     refund_escrow_hold(
         hold=hold,
-        idempotency_key=f"milestone:{milestone.pk}:dispute:refund",
+        idempotency_key=f"milestone:{milestone.public_id}:dispute:refund",
         initiated_by=user,
         amount=milestone.amount,
         reference_type="milestone",
-        reference_id=str(milestone.pk),
+        reference_id=str(milestone.public_id),
         description=note or _("Dispute resolved in favor of the client."),
         metadata={
-            "contract_id": milestone.contract_id,
-            "milestone_id": milestone.pk,
+            "contract_public_id": milestone.contract.public_id,
+            "milestone_public_id": milestone.public_id,
             "resolution": "client",
         },
     )
@@ -895,7 +899,7 @@ def resolve_dispute_to_client(*, milestone: Milestone, user, note: str = "") -> 
         contract=milestone.contract,
         event_type=ContractEvent.ContractEventType.MILESTONE_DISPUTE_RESOLVED_TO_CLIENT,
         actor=user,
-        metadata={"milestone_id": milestone.pk, "note": note},
+        metadata={"milestone_public_id": milestone.public_id, "note": note},
     )
 
     return milestone

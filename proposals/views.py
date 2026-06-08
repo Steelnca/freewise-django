@@ -145,8 +145,8 @@ class AcceptProposalView(APIView):
         return Response(
             {
                 "detail": "Proposal accepted. Contract created.",
-                "contract_id": contract.pk,
-                "milestone_id": milestone.pk,
+                "contract_public_id": contract.public_id,
+                "milestone_public_id": milestone.public_id,
             },
             status=status.HTTP_201_CREATED,
         )

@@ -88,12 +88,21 @@ class Wallet(TimeStampedModel):
         verbose_name=_("available balance"),
         help_text=_("Money the user can spend or withdraw right now."),
     )
+
     escrow_balance = models.DecimalField(
         max_digits=MONEY_MAX_DIGITS,
         decimal_places=MONEY_DECIMAL_PLACES,
         default=Decimal("0.00"),
         verbose_name=_("escrow balance"),
         help_text=_("Money currently locked in contract escrow."),
+    )
+
+    lifetime_earnings = models.DecimalField(
+        max_digits=MONEY_MAX_DIGITS,
+        decimal_places=MONEY_DECIMAL_PLACES,
+        default=Decimal("0.00"),
+        verbose_name=_("life time earnings"),
+        help_text=_("Available money earned through lifetime."),
     )
 
     status = models.CharField(
@@ -758,10 +767,10 @@ class PaymentAttempt(models.Model):
     )
 
     amount = models.DecimalField(
-        max_digits=14,
+        max_digits=12,
         decimal_places=2,
         verbose_name=_("amount"),
-        help_text=_("Amount requested from the client for this milestone."),
+        help_text=_("Amount of money to be paid in this attempt."),
     )
 
     currency = models.CharField(
@@ -989,6 +998,14 @@ class PaymentAttempt(models.Model):
     def is_final(self) -> bool:
         return self.internal_status in {
             self.InternalStatus.SETTLED,
+            self.InternalStatus.FAILED,
+            self.InternalStatus.CANCELED,
+            self.InternalStatus.EXPIRED,
+        }
+
+    @property
+    def retryable(self) -> bool:
+        return self.internal_status in {
             self.InternalStatus.FAILED,
             self.InternalStatus.CANCELED,
             self.InternalStatus.EXPIRED,

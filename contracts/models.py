@@ -234,7 +234,7 @@ class Contract(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.public_id:
-            self.public_id = _generate_prefixed_public_id("FWC", Contract)
+            self.public_id = _generate_prefixed_public_id("fwc", Contract)
         super().save(*args, **kwargs)
 
     @property
@@ -390,6 +390,14 @@ class Milestone(models.Model):
         help_text=_("A note from the client after review."),
     )
 
+    revision_note = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("revision note"),
+        help_text=_("A note from the client after revision."),
+    )
+
+
     dispute_reason = models.TextField(
         blank=True,
         default="",
@@ -510,7 +518,7 @@ class Milestone(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.public_id:
-            self.public_id = _generate_prefixed_public_id("FWM", Milestone)
+            self.public_id = _generate_prefixed_public_id("fwm", Milestone)
         super().save(*args, **kwargs)
 
 

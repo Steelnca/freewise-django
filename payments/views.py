@@ -180,15 +180,11 @@ class RequestPayoutView(APIView):
         )
 
 
-class FundMilestoneView(APIView):
-    """
-    POST /api/payments/fund/<milestone_id>/
-
-    Creates or reuses an internal payment attempt, asks the configured gateway
-    for a hosted checkout, stores the checkout details, and returns the URL.
-    """
-
+class BasePaymentAttemptView(APIView):
     permission_classes = [IsAuthenticated]
+
+    def _frontend_base_url(self) -> str:
+        return getattr(settings, "FREEWISE_FRONTEND_URL", "http://localhost:3000").rstrip("/")
 
     def _webhook_base_url(self, request) -> str:
         base_url = getattr(settings, "FREEWISE_WEBHOOK_BASE_URL", "").strip().rstrip("/")
@@ -200,29 +196,70 @@ class FundMilestoneView(APIView):
         self,
         request,
         *,
-        attempt: PaymentAttempt,
         contract: Contract,
         milestone: Milestone,
         provider_name: str,
     ):
-        frontend_base = getattr(settings, "FREEWISE_FRONTEND_URL", "http://localhost:3000").rstrip("/")
-
         query = urlencode(
             {
-                "attempt": str(attempt.attempt_id),
-                "milestone": str(milestone.id),
-                "contract": str(contract.id),
-                "provider": provider_name,
+                "milestone": str(milestone.public_id),
+                "contract": str(contract.public_id),
             }
         )
 
-        success_url = f"{frontend_base}/payments/success?{query}"
-        failure_url = f"{frontend_base}/payments/failed?{query}"
+        success_url = f"{self._frontend_base_url()}/dashboard/payments/success?{query}"
+        failure_url = f"{self._frontend_base_url()}/dashboard/payments/failure?{query}"
         webhook_url = f"{self._webhook_base_url(request)}/api/payments/webhooks/{provider_name}/"
 
         return success_url, failure_url, webhook_url
 
-    def post(self, request, milestone_id: int):
+    def _client_profile(self, request):
+        account = getattr(request.user, "account", None)
+        return getattr(account, "client_profile", None)
+
+    def _ensure_client_party(self, request, contract: Contract):
+        client = self._client_profile(request)
+        if not client or contract.client_id != client.id:
+            raise PermissionDenied(_("Only the client can perform this action."))
+
+    def _idempotency_key(self, request, *, fallback: str) -> str:
+        return (
+            request.headers.get("Idempotency-Key")
+            or request.headers.get("X-Idempotency-Key")
+            or request.data.get("idempotency_key")
+            or fallback
+        )
+
+    def _latest_attempt_for_milestone(self, milestone: Milestone):
+        latest = PaymentAttempt.objects.latest_for_milestone(milestone)
+        if latest and not latest.is_final:
+            latest = refresh_payment_attempt_from_provider(attempt=latest)
+        return latest
+
+    def _open_checkout_response(self, attempt: PaymentAttempt, milestone: Milestone):
+        return Response(
+            {
+                "checkout_url": attempt.provider_checkout_url,
+                "checkout_id": attempt.provider_checkout_id,
+                "payment_attempt_id": str(attempt.attempt_id),
+                "milestone_public_id": milestone.public_id,
+                "amount": str(attempt.amount),
+                "currency": attempt.currency,
+                "attempt_status": attempt.internal_status,
+                "provider_status": attempt.provider_status,
+                "provider": attempt.provider,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+class FundMilestoneView(BasePaymentAttemptView):
+    """
+    POST /api/payments/fund/<milestone_public_id>/
+
+    Creates the first checkout for a milestone.
+    Never turns a final attempt into a retry.
+    """
+    def post(self, request, milestone_public_id: str):
         attempt = None
 
         try:
@@ -232,24 +269,20 @@ class FundMilestoneView(APIView):
                     "contract__client__account__user",
                     "contract__freelancer__account__user",
                 ),
-                pk=milestone_id,
+                public_id=milestone_public_id,
             )
-
             contract = milestone.contract
 
             ensure_party_access(contract, request.user)
-
-            account = getattr(request.user, "account", None)
-            client = getattr(account, "client_profile", None)
-            if not client or contract.client_id != client.id:
-                raise PermissionDenied(_("Only the client can fund this milestone."))
+            self._ensure_client_party(request, contract)
 
             if contract.status not in {
                 Contract.Status.PENDING_FUNDING,
                 Contract.Status.IN_PROGRESS,
             }:
-                raise ValidationError(
-                    {"detail": _("This contract is not accepting funding right now.")}
+                return Response(
+                    {"detail": _("This contract is not accepting funding right now.")},
+                    status=status.HTTP_409_CONFLICT,
                 )
 
             if milestone_has_settled_or_paid_payment(milestone=milestone):
@@ -263,32 +296,43 @@ class FundMilestoneView(APIView):
                 .order_by("order", "created_at")
                 .first()
             )
-
             if not first_pending or first_pending.pk != milestone.pk:
-                raise ValidationError(
-                    {"detail": _("Fund the first pending milestone in order.")}
+                return Response(
+                    {"detail": _("Only the earliest pending milestone can be funded.")},
+                    status=status.HTTP_409_CONFLICT,
                 )
 
             gateway = get_payment_gateway()
             provider_name = gateway.provider_name.strip().lower()
 
-            latest_attempt = PaymentAttempt.objects.latest_for_milestone(milestone)
-            reuse_existing_attempt = (
-                latest_attempt
-                and latest_attempt.provider == provider_name
-                and not latest_attempt.is_final
-            )
+            latest_attempt = self._latest_attempt_for_milestone(milestone)
 
-            if reuse_existing_attempt:
+            if latest_attempt:
+                if latest_attempt.internal_status == PaymentAttempt.InternalStatus.SETTLED:
+                    return Response(
+                        {"detail": _("This milestone is already funded.")},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                if latest_attempt.internal_status in {
+                    PaymentAttempt.InternalStatus.FAILED,
+                    PaymentAttempt.InternalStatus.CANCELED,
+                    PaymentAttempt.InternalStatus.EXPIRED,
+                }:
+                    return Response(
+                        {"detail": _("This milestone has a previous failed payment. Use retry instead.")},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                if latest_attempt.provider_checkout_id and latest_attempt.provider_checkout_url:
+                    return self._open_checkout_response(latest_attempt, milestone)
+
                 attempt = latest_attempt
                 response_status = status.HTTP_200_OK
             else:
-                next_number = PaymentAttempt.objects.next_attempt_number(milestone)
-                idempotency_key = (
-                    request.headers.get("Idempotency-Key")
-                    or request.headers.get("X-Idempotency-Key")
-                    or request.data.get("idempotency_key")
-                    or f"milestone:{milestone.id}:attempt:{next_number}"
+                idempotency_key = self._idempotency_key(
+                    request,
+                    fallback=f"milestone:{milestone.public_id}:attempt:1",
                 )
 
                 attempt = create_payment_attempt_for_milestone(
@@ -298,13 +342,12 @@ class FundMilestoneView(APIView):
                     provider_name=provider_name,
                     success_url="",
                     failure_url="",
-                    retry_of=latest_attempt if latest_attempt and latest_attempt.is_final else None,
+                    retry_of=None,
                 )
                 response_status = status.HTTP_201_CREATED
 
             success_url, failure_url, webhook_url = self._build_redirect_urls(
                 request,
-                attempt=attempt,
                 contract=contract,
                 milestone=milestone,
                 provider_name=provider_name,
@@ -316,22 +359,9 @@ class FundMilestoneView(APIView):
                 attempt.save(update_fields=["success_url", "failure_url", "updated_at"])
 
             if attempt.provider_checkout_id and attempt.provider_checkout_url:
-                return Response(
-                    {
-                        "checkout_url": attempt.provider_checkout_url,
-                        "checkout_id": attempt.provider_checkout_id,
-                        "payment_attempt_id": str(attempt.attempt_id),
-                        "milestone_id": milestone.id,
-                        "amount": str(attempt.amount),
-                        "currency": attempt.currency,
-                        "attempt_status": attempt.internal_status,
-                        "provider_status": attempt.provider_status,
-                        "provider": attempt.provider,
-                    },
-                    status=status.HTTP_200_OK,
-                )
+                return self._open_checkout_response(attempt, milestone)
 
-            description = f"Freewise — {milestone.title} (Contract #{contract.pk})"
+            description = f"Freewise — {milestone.title} (Contract #{contract.public_id})"
 
             checkout = gateway.create_checkout(
                 amount=attempt.amount,
@@ -342,8 +372,8 @@ class FundMilestoneView(APIView):
                 description=description,
                 metadata={
                     "attempt_id": str(attempt.attempt_id),
-                    "milestone_id": milestone.id,
-                    "contract_id": contract.id,
+                    "milestone_public_id": milestone.public_id,
+                    "contract_public_id": contract.public_id,
                     "provider": provider_name,
                 },
                 idempotency_key=attempt.idempotency_key,
@@ -361,7 +391,7 @@ class FundMilestoneView(APIView):
                     "checkout_url": checkout.checkout_url,
                     "checkout_id": checkout.checkout_id,
                     "payment_attempt_id": str(attempt.attempt_id),
-                    "milestone_id": milestone.id,
+                    "milestone_public_id": milestone.public_id,
                     "amount": str(attempt.amount),
                     "currency": attempt.currency,
                     "attempt_status": attempt.internal_status,
@@ -376,7 +406,6 @@ class FundMilestoneView(APIView):
 
         except ValidationError as exc:
             detail = exc.message_dict if hasattr(exc, "message_dict") else exc.messages
-            raise ValidationError({"detail": detail})
             return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
 
         except Exception as exc:
@@ -390,11 +419,124 @@ class FundMilestoneView(APIView):
                 except Exception:
                     logger.exception("Failed to mark payment attempt as failed")
 
-            logger.exception("Payment checkout creation failed for milestone %s", milestone_id)
+            logger.exception("Payment checkout creation failed for milestone %s", milestone_public_id)
             return Response(
                 {"detail": _("Failed to create payment checkout.")},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
+
+class RetryFundMilestoneView(BasePaymentAttemptView):
+    """
+    POST /api/payments/milestones/<milestone_public_id>/retry/
+
+    Open attempts are reused only if they are still genuinely open.
+    Final failed/canceled/expired attempts create a new row.
+    """
+
+    def post(self, request, milestone_public_id):
+        try:
+            milestone = get_object_or_404(
+                Milestone.objects.select_related(
+                    "contract",
+                    "contract__client__account__user",
+                    "contract__freelancer__account__user",
+                ),
+                public_id=milestone_public_id,
+            )
+            contract = milestone.contract
+
+            ensure_party_access(contract, request.user)
+            self._ensure_client_party(request, contract)
+
+            latest_attempt = PaymentAttempt.objects.latest_for_milestone(milestone)
+            if not latest_attempt:
+                return Response(
+                    {"detail": _("No previous payment attempt exists for this milestone.")},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            # Fresh truth from provider before deciding whether to reuse or retry.
+            latest_attempt = refresh_payment_attempt_from_provider(attempt=latest_attempt)
+
+            if latest_attempt.internal_status == PaymentAttempt.InternalStatus.SETTLED:
+                return Response(
+                    {"detail": _("This milestone is already funded. Retry is disabled.")},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            if (
+                not latest_attempt.is_final
+                and latest_attempt.provider_checkout_id
+                and latest_attempt.provider_checkout_url
+            ):
+                return self._open_checkout_response(latest_attempt, milestone)
+
+            if not latest_attempt.retryable:
+                return Response(
+                    {"detail": _("This payment attempt cannot be retried yet.")},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            gateway = get_payment_gateway(latest_attempt.provider)
+
+            success_url, failure_url, webhook_url = self._build_redirect_urls(
+                request,
+                contract=contract,
+                milestone=milestone,
+                provider_name=latest_attempt.provider,
+            )
+
+            next_idempotency_key = self._idempotency_key(
+                request,
+                fallback=(
+                    f"retry:milestone:{milestone.public_id}:"
+                    f"attempt:{latest_attempt.attempt_number + 1}"
+                ),
+            )
+
+            retry_attempt = retry_payment_attempt_checkout(
+                attempt=latest_attempt,
+                gateway=gateway,
+                idempotency_key=next_idempotency_key,
+                initiated_by=request.user,
+                success_url=success_url,
+                failure_url=failure_url,
+                webhook_url=webhook_url,
+            )
+
+            return Response(
+                {
+                    "checkout_url": retry_attempt.provider_checkout_url,
+                    "checkout_id": retry_attempt.provider_checkout_id,
+                    "payment_attempt_id": str(retry_attempt.attempt_id),
+                    "milestone_public_id": retry_attempt.milestone.public_id,
+                    "amount": str(retry_attempt.amount),
+                    "currency": retry_attempt.currency,
+                    "attempt_status": retry_attempt.internal_status,
+                    "provider_status": retry_attempt.provider_status,
+                    "provider": retry_attempt.provider,
+                },
+                status=status.HTTP_201_CREATED
+                if retry_attempt.pk != latest_attempt.pk
+                else status.HTTP_200_OK,
+            )
+
+        except PermissionDenied as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+
+        except ValidationError as exc:
+            detail = exc.message_dict if hasattr(exc, "message_dict") else exc.messages
+            text = str(detail).lower()
+            code = status.HTTP_409_CONFLICT if "already funded" in text or "already paid" in text else status.HTTP_400_BAD_REQUEST
+            return Response({"detail": detail}, status=code)
+
+        except Exception:
+            logger.exception("Retry checkout failed for milestone=%s", milestone_public_id)
+            return Response(
+                {"detail": _("Failed to create retry checkout.")},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
 
 @method_decorator(csrf_exempt, name="dispatch")
 class PaymentGatewayWebhookView(APIView):
@@ -490,24 +632,18 @@ class PaymentAttemptStatusView(APIView):
         if not attempt.is_final and attempt.provider_checkout_id:
             attempt = reconcile_attempt(attempt)
 
-        retryable = attempt.internal_status in {
-            PaymentAttempt.InternalStatus.FAILED,
-            PaymentAttempt.InternalStatus.CANCELED,
-            PaymentAttempt.InternalStatus.EXPIRED,
-        }
-
         return Response(
             {
                 "payment_attempt_id": str(attempt.attempt_id),
-                "contract_id": attempt.contract_id,
-                "milestone_id": attempt.milestone_id,
+                "contract_public_id": attempt.contract.public_id,
+                "milestone_public_id": attempt.milestone.public_id,
                 "provider": attempt.provider,
                 "checkout_id": attempt.provider_checkout_id,
                 "checkout_url": attempt.provider_checkout_url,
                 "internal_status": attempt.internal_status,
                 "provider_status": attempt.provider_status,
                 "is_final": attempt.is_final,
-                "retryable": retryable,
+                "retryable": attempt.retryable,
                 "amount": str(attempt.amount),
                 "currency": attempt.currency,
                 "provider_paid_at": attempt.provider_paid_at,
@@ -520,108 +656,60 @@ class PaymentAttemptStatusView(APIView):
             status=status.HTTP_200_OK,
         )
 
-class RetryPaymentAttemptView(APIView):
+class MilestoneLatestAttemptStatusView(BasePaymentAttemptView):
     """
-    POST /api/payments/attempts/<attempt_id>/retry/
+    GET /api/payments/milestones/<milestone_public_id>/attempt-status/
 
-    Reuses an open checkout if it exists.
-    Creates a new checkout only when the latest attempt is retryable.
+    Returns the latest payment attempt for the milestone,
+    refreshed from the provider before response.
     """
-    permission_classes = [IsAuthenticated]
-
-    def _webhook_base_url(self, request) -> str:
-        base_url = getattr(settings, "FREEWISE_WEBHOOK_BASE_URL", "").strip().rstrip("/")
-        if base_url:
-            return base_url
-        return request.build_absolute_uri("/").rstrip("/")
-
-    def _build_redirect_urls(self, request, *, attempt: PaymentAttempt):
-        frontend_base = getattr(settings, "FREEWISE_FRONTEND_URL", "http://localhost:3000").rstrip("/")
-
-        query = urlencode(
-            {
-                "attempt": str(attempt.attempt_id),
-                "milestone": str(attempt.milestone_id),
-                "contract": str(attempt.contract_id),
-                "provider": attempt.provider,
-            }
+    def get(self, request, milestone_public_id: str):
+        milestone = get_object_or_404(
+            Milestone.objects.select_related(
+                "contract",
+                "contract__client__account__user",
+                "contract__freelancer__account__user",
+            ),
+            public_id=milestone_public_id,
         )
 
-        success_url = f"{frontend_base}/payments/success?{query}"
-        failure_url = f"{frontend_base}/payments/failed?{query}"
-        webhook_url = f"{self._webhook_base_url(request)}/api/payments/webhooks/{attempt.provider}/"
-        return success_url, failure_url, webhook_url
+        ensure_party_access(milestone.contract, request.user)
 
-    def post(self, request, attempt_id):
-        try:
-            attempt = get_object_or_404(
-                PaymentAttempt.objects.select_related("contract", "milestone"),
-                attempt_id=attempt_id,
-            )
-
-            ensure_party_access(attempt.contract, request.user)
-
-            account = getattr(request.user, "account", None)
-            client = getattr(account, "client_profile", None)
-            if not client or attempt.contract.client_id != client.id:
-                raise PermissionDenied(_("Only the client can retry this payment."))
-
-            if milestone_has_settled_or_paid_payment(milestone=attempt.milestone):
-                return Response(
-                    {"detail": _("This milestone is already funded. Retry is disabled.")},
-                    status=status.HTTP_409_CONFLICT,
-                )
-
-            gateway = get_payment_gateway(attempt.provider)
-
-            success_url, failure_url, webhook_url = self._build_redirect_urls(
-                request,
-                attempt=attempt,
-            )
-
-            next_key = (
-                request.headers.get("Idempotency-Key")
-                or request.headers.get("X-Idempotency-Key")
-                or f"retry:milestone:{attempt.milestone_id}:attempt:{attempt.attempt_number + 1}"
-            )
-
-            retry_attempt = retry_payment_attempt_checkout(
-                attempt=attempt,
-                gateway=gateway,
-                idempotency_key=next_key,
-                initiated_by=request.user,
-                success_url=success_url,
-                failure_url=failure_url,
-                webhook_url=webhook_url,
-            )
-
+        latest_attempt = PaymentAttempt.objects.latest_for_milestone(milestone)
+        if not latest_attempt:
             return Response(
-                {
-                    "checkout_url": retry_attempt.provider_checkout_url,
-                    "checkout_id": retry_attempt.provider_checkout_id,
-                    "payment_attempt_id": str(retry_attempt.attempt_id),
-                    "milestone_id": retry_attempt.milestone_id,
-                    "amount": str(retry_attempt.amount),
-                    "currency": retry_attempt.currency,
-                    "attempt_status": retry_attempt.internal_status,
-                    "provider_status": retry_attempt.provider_status,
-                    "provider": retry_attempt.provider,
-                },
-                status=status.HTTP_200_OK if retry_attempt.pk == attempt.pk else status.HTTP_201_CREATED,
+                {"detail": _("No payment attempt found for this milestone.")},
+                status=status.HTTP_404_NOT_FOUND,
             )
 
-        except PermissionDenied as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        latest_attempt = refresh_payment_attempt_from_provider(attempt=latest_attempt)
 
-        except ValidationError as exc:
-            detail = exc.message_dict if hasattr(exc, "message_dict") else exc.messages
-            text = str(detail).lower()
-            code = status.HTTP_409_CONFLICT if "already paid" in text else status.HTTP_400_BAD_REQUEST
-            return Response({"detail": detail}, status=code)
+        retryable = latest_attempt.internal_status in {
+            PaymentAttempt.InternalStatus.FAILED,
+            PaymentAttempt.InternalStatus.CANCELED,
+            PaymentAttempt.InternalStatus.EXPIRED,
+        }
 
-        except Exception:
-            logger.exception("Retry checkout failed for attempt=%s", attempt_id)
-            return Response(
-                {"detail": _("Failed to create retry checkout.")},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+        return Response(
+            {
+                "payment_attempt_id": str(latest_attempt.attempt_id),
+                "contract_public_id": milestone.contract.public_id,
+                "milestone_public_id": milestone.public_id,
+                "provider": latest_attempt.provider,
+                "checkout_id": latest_attempt.provider_checkout_id,
+                "checkout_url": latest_attempt.provider_checkout_url,
+                "internal_status": latest_attempt.internal_status,
+                "provider_status": latest_attempt.provider_status,
+                "is_final": latest_attempt.is_final,
+                "retryable": retryable,
+                "amount": str(latest_attempt.amount),
+                "currency": latest_attempt.currency,
+                "provider_paid_at": latest_attempt.provider_paid_at,
+                "webhook_received_at": latest_attempt.webhook_received_at,
+                "webhook_processed_at": latest_attempt.webhook_processed_at,
+                "reconciled_at": latest_attempt.reconciled_at,
+                "settled_at": latest_attempt.settled_at,
+                "failure_reason": latest_attempt.failure_reason,
+            },
+            status=status.HTTP_200_OK,
+        )
