@@ -10,6 +10,6 @@ urlpatterns = [
     path('create/',        JobCreateView.as_view(),  name='job-create'),
     path('mine/',          MyJobsView.as_view(),     name='job-mine'),
     path('categories/',    CategoryListView.as_view(), name='category-list'),
-    path('<int:pk>/',      JobDetailView.as_view(),  name='job-detail'),
-    path('<int:pk>/edit/', JobUpdateView.as_view(),  name='job-update'),
+    path('<str:public_id>/',      JobDetailView.as_view(),  name='job-detail'),
+    path('<str:public_id>/edit/', JobUpdateView.as_view(),  name='job-update'),
 ]

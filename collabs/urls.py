@@ -1,13 +1,22 @@
 from django.urls import path
-from .views import (
-    CollabPostListView, CollabPostCreateView, CollabPostDetailView,
-    ApplyCollabView, RespondCollabApplicationView,
-)
+
+from .views import CollabAcceptView, CollabApplyView, CollabRequestCreateView
 
 urlpatterns = [
-    path('',                                        CollabPostListView.as_view(),           name='collab-list'),
-    path('create/',                                 CollabPostCreateView.as_view(),         name='collab-create'),
-    path('<int:pk>/',                               CollabPostDetailView.as_view(),         name='collab-detail'),
-    path('<int:pk>/apply/',                         ApplyCollabView.as_view(),              name='collab-apply'),
-    path('applications/<int:pk>/<str:action>/',     RespondCollabApplicationView.as_view(), name='collab-application-respond'),
+
+    path(
+        "milestones/<str:milestone_public_id>/collabs/",
+        CollabRequestCreateView.as_view(),
+        name="collab-request-create",
+    ),
+    path(
+        "collabs/<str:request_public_id>/apply/",
+        CollabApplyView.as_view(),
+        name="collab-apply",
+    ),
+    path(
+        "collab-applications/<str:application_public_id>/accept/",
+        CollabAcceptView.as_view(),
+        name="collab-accept",
+    ),
 ]

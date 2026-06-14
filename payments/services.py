@@ -733,11 +733,15 @@ def release_escrow_hold_to_wallet(
     source_before_escrow = source_wallet.escrow_balance
     recipient_before_available = recipient_wallet.available_balance
     recipient_before_escrow = recipient_wallet.escrow_balance
+    recipient_before_earnings = recipient_wallet.lifetime_earnings
     fee_before_available = locked_fee_wallet.available_balance if locked_fee_wallet else None
     fee_before_escrow = locked_fee_wallet.escrow_balance if locked_fee_wallet else None
 
     source_wallet.escrow_balance = source_before_escrow - total_outgoing
     recipient_wallet.available_balance = recipient_before_available + release_amount
+
+    # Count life time money earnings
+    recipient_wallet.lifetime_earnings = recipient_before_earnings + release_amount
 
     if locked_fee_wallet and fee_amount > 0:
         locked_fee_wallet.available_balance = locked_fee_wallet.available_balance + fee_amount
@@ -748,7 +752,7 @@ def release_escrow_hold_to_wallet(
         locked_fee_wallet.full_clean()
 
     source_wallet.save(update_fields=["escrow_balance", "updated_at"])
-    recipient_wallet.save(update_fields=["available_balance", "updated_at"])
+    recipient_wallet.save(update_fields=["available_balance", "lifetime_earnings", "updated_at"])
     if locked_fee_wallet and fee_amount > 0:
         locked_fee_wallet.save(update_fields=["available_balance", "updated_at"])
 
@@ -1132,7 +1136,7 @@ def settle_payment_attempt(
         currency=contract.currency or DEFAULT_CURRENCY,
     )
 
-    deposit_tx = record_deposit(
+    record_deposit(
         wallet=wallet,
         amount=attempt.amount,
         idempotency_key=f"{attempt.idempotency_key}:deposit",
@@ -1208,7 +1212,7 @@ def fail_payment_attempt(
         attempt.webhook_processed_at = timezone.now()
 
     normalized = (provider_status or "").strip().lower()
-    if normalized == "canceled":
+    if normalized == "canceled" or normalized == "cancelled":
         return PaymentAttempt.objects.mark_canceled(
             attempt,
             reason=reason,
@@ -1589,7 +1593,7 @@ def refresh_payment_attempt_from_provider(*, attempt: PaymentAttempt) -> Payment
             provider_status="paid",
         )
 
-    if normalized_status in {"failed", "canceled", "expired"}:
+    if normalized_status in {"failed", "canceled", "cancelled", "expired"}:
         return fail_payment_attempt(
             attempt=attempt,
             reason=_("Provider checkout did not complete."),

@@ -1,5 +1,11 @@
+
+from decimal import Decimal
+
 from django.db import models
 from django.utils.translation import gettext_lazy as _
+from django.core.exceptions import ValidationError
+
+from core.models.mixins import PublicIDMixin
 
 
 class Category(models.Model):
@@ -23,7 +29,7 @@ class Tag(models.Model):
         return self.name
 
 
-class Job(models.Model):
+class Job(PublicIDMixin, models.Model):
 
     class Status(models.TextChoices):
         OPEN        = 'OPEN',        _('Open')
@@ -35,6 +41,21 @@ class Job(models.Model):
         ENTRY    = 'ENTRY',    _('Entry Level')
         MID      = 'MID',      _('Mid Level')
         EXPERT   = 'EXPERT',   _('Expert')
+
+    class PricingMode(models.TextChoices):
+        FIXED = "FIXED", _("Fixed")
+        NEGOTIABLE = "NEGOTIABLE", _("Negotiable")
+
+    class MilestoneMode(models.TextChoices):
+        SINGLE = "SINGLE", _("Single")
+        MULTI = "MULTI", _("Multi")
+
+    class SplitOwner(models.TextChoices):
+        CLIENT = "CLIENT", _("Client")
+        FREELANCER = "FREELANCER", _("Freelancer")
+
+    PUBLIC_ID_PREFIX = "fwj"
+    PUBLIC_ID_LENGTH_PREFIX = 8
 
     # --- Ownership ---
     client = models.ForeignKey(
@@ -59,10 +80,6 @@ class Job(models.Model):
         default=ExperienceLevel.MID,
     )
 
-    # --- Budget ---
-    budget_min = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    budget_max = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-
     # --- Deadline ---
     deadline = models.DateField(null=True, blank=True)
 
@@ -74,6 +91,36 @@ class Job(models.Model):
         db_index=True,
     )
 
+    pricing_mode = models.CharField(
+        max_length=20,
+        choices=PricingMode.choices,
+        default=PricingMode.NEGOTIABLE,
+        db_index=True,
+    )
+
+    milestone_mode = models.CharField(
+        max_length=10,
+        choices=MilestoneMode.choices,
+        default=MilestoneMode.SINGLE,
+        db_index=True,
+    )
+
+    split_owner = models.CharField(
+        max_length=20,
+        choices=SplitOwner.choices,
+        default=SplitOwner.CLIENT,
+        db_index=True,
+    )
+
+    collab_allowed = models.BooleanField(default=False)
+
+    budget_total = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        verbose_name=_('Budget Total'),
+        help_text=_('Budget total range of the client.')
+    )
+
     # --- Timestamps ---
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -83,3 +130,9 @@ class Job(models.Model):
 
     def __str__(self):
         return self.title
+
+    def clean(self):
+        super().clean()
+
+        if self.budget_total is not None and self.budget_total <= Decimal("0.00"):
+            raise ValidationError({"budget_total": _("Job budget total must be greater than zero.")})

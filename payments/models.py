@@ -23,6 +23,8 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
+from core.models.mixins import PublicIDMixin
+
 from .constants import MONEY_MAX_DIGITS, MONEY_DECIMAL_PLACES
 from .managers import PaymentAttemptManager
 
@@ -49,7 +51,6 @@ class TimeStampedModel(models.Model):
 
     class Meta:
         abstract = True
-
 
 class Wallet(TimeStampedModel):
     """
@@ -137,8 +138,7 @@ class Wallet(TimeStampedModel):
                 {"escrow_balance": _("Escrow balance cannot be negative.")}
             )
 
-
-class WalletTransaction(TimeStampedModel):
+class WalletTransaction(PublicIDMixin, TimeStampedModel):
     """
     Immutable ledger entry.
 
@@ -161,6 +161,9 @@ class WalletTransaction(TimeStampedModel):
         COMPLETED = "completed", _("Completed")
         FAILED = "failed", _("Failed")
         REVERSED = "reversed", _("Reversed")
+
+    PUBLIC_ID_PREFIX = "fwwt"
+    PUBLIC_ID_LENGTH_PREFIX = 32
 
     wallet = models.ForeignKey(
         Wallet,
@@ -311,8 +314,7 @@ class WalletTransaction(TimeStampedModel):
         if self.balance_after < 0:
             raise ValidationError({"balance_after": _("Balance after cannot be negative.")})
 
-
-class EscrowHold(TimeStampedModel):
+class EscrowHold(PublicIDMixin, TimeStampedModel):
     """
     Tracks money locked for a contract.
 
@@ -326,6 +328,9 @@ class EscrowHold(TimeStampedModel):
         REFUNDED = "refunded", _("Refunded")
         DISPUTED = "disputed", _("Disputed")
         CANCELLED = "cancelled", _("Cancelled")
+
+    PUBLIC_ID_PREFIX = "fweh"
+    PUBLIC_ID_LENGTH_PREFIX = 8
 
     wallet = models.ForeignKey(
         Wallet,
@@ -429,7 +434,7 @@ class EscrowHold(TimeStampedModel):
         if self.amount is not None and self.amount < Decimal("0.00"):
             raise ValidationError({"amount": _("Amount cannot be negative.")})
 
-class Payout(TimeStampedModel):
+class Payout(PublicIDMixin, TimeStampedModel):
     """
     Tracks the release of freelancer earnings out of the platform.
 
@@ -444,6 +449,9 @@ class Payout(TimeStampedModel):
         FAILED = "failed", _("Failed")
         REVERSED = "reversed", _("Reversed")
         CANCELLED = "cancelled", _("Cancelled")
+
+    PUBLIC_ID_PREFIX = "fwpo"
+    PUBLIC_ID_LENGTH_PREFIX = 12
 
     wallet = models.ForeignKey(
         Wallet,
@@ -572,7 +580,6 @@ class Payout(TimeStampedModel):
         super().clean()
         if self.amount <= 0:
             raise ValidationError({"amount": _("Amount must be greater than zero.")})
-
 
 class WebhookLog(TimeStampedModel):
     """

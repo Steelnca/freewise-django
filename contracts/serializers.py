@@ -11,21 +11,24 @@ from decimal import Decimal
 from payments.models import PaymentAttempt
 from payments.services import refresh_payment_attempt_from_provider
 
-from .models import Contract, Milestone, ContractEvent
+from .models import Contract, Milestone, ContractEvent, MilestonePlan, MilestonePlanItem, MilestoneSubmission
 
 
 class MilestoneSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display", read_only=True)
     latest_payment_attempt_id = serializers.SerializerMethodField()
-    latest_payment_attempt_status = serializers.SerializerMethodField()
+    latest_payment_attempt_internal_status = serializers.SerializerMethodField()
     latest_payment_attempt_provider_status = serializers.SerializerMethodField()
     latest_payment_attempt_checkout_url = serializers.SerializerMethodField()
     latest_payment_attempt_retryable = serializers.SerializerMethodField()
+    source_item_public_id = serializers.CharField(source="source_item.public_id", read_only=True)
 
     class Meta:
         model = Milestone
         fields = (
             "public_id",
+            "source_item_public_id",
+            "proposal_id",
             "title",
             "description",
             "currency",
@@ -51,7 +54,7 @@ class MilestoneSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "latest_payment_attempt_id",
-            "latest_payment_attempt_status",
+            "latest_payment_attempt_internal_status",
             "latest_payment_attempt_provider_status",
             "latest_payment_attempt_checkout_url",
             "latest_payment_attempt_retryable",
@@ -77,7 +80,7 @@ class MilestoneSerializer(serializers.ModelSerializer):
         attempt = self._latest_payment_attempt(obj)
         return str(attempt.attempt_id) if attempt else None
 
-    def get_latest_payment_attempt_status(self, obj):
+    def get_latest_payment_attempt_internal_status(self, obj):
         attempt = self._latest_payment_attempt(obj)
         return attempt.internal_status if attempt else None
 
@@ -108,6 +111,9 @@ class ContractSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display", read_only=True)
     source_label = serializers.SerializerMethodField()
     milestones = MilestoneSerializer(many=True, read_only=True)
+    milestone_mode = serializers.CharField(source="get_milestone_mode_display", read_only=True)
+    milestone_mode_value = serializers.CharField(source="milestone_mode", read_only=True)
+    collab_allowed = serializers.BooleanField(read_only=True)
 
     viewer_role = serializers.SerializerMethodField()
     viewer_is_client = serializers.SerializerMethodField()
@@ -150,6 +156,9 @@ class ContractSerializer(serializers.ModelSerializer):
             "milestone_total",
             "remaining_amount",
             "funding_progress",
+            "milestone_mode",
+            "milestone_mode_value",
+            "collab_allowed",
             "first_pending_milestone_public_id",
             "first_funded_milestone_public_id",
             "has_suspension",
@@ -316,6 +325,7 @@ class ContractSerializer(serializers.ModelSerializer):
         return None
 
 class MilestoneActionSerializer(serializers.Serializer):
+    review_note = serializers.CharField(required=False, allow_blank=True, default="")
     revision_note = serializers.CharField(required=False, allow_blank=True, default="")
     revision_scope = serializers.CharField(required=False, allow_blank=True, default="")
     submission_link = serializers.URLField(required=False, allow_blank=True, default="")
@@ -337,10 +347,62 @@ class ContractEventSerializer(serializers.ModelSerializer):
     class Meta:
         model = ContractEvent
         fields = (
-            "id",
+            "public_id",
             "event_type",
             "actor_username",
             "metadata",
             "created_at",
         )
         read_only_fields = fields
+
+class MilestonePlanItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MilestonePlanItem
+        fields = [
+            "public_id",
+            "proposal",
+            "title",
+            "description",
+            "amount",
+            "due_date",
+            "order",
+            "status",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["public_id", "status", "created_at", "updated_at"]
+
+class MilestonePlanSerializer(serializers.ModelSerializer):
+    items = MilestonePlanItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = MilestonePlan
+        fields = [
+            "public_id",
+            "proposal",
+            "created_by",
+            "status",
+            "note",
+            "total_amount",
+            "currency",
+            "suggestion_enabled",
+            "items",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["public_id", "total_amount", "created_at", "updated_at"]
+
+class MilestoneSubmissionSerializer(serializers.ModelSerializer):
+    milestone_public_id = serializers.CharField(source="milestone.public_id", read_only=True)
+    class Meta:
+        model = MilestoneSubmission
+        fields = [
+            "public_id",
+            "milestone_public_id",
+            "submitted_by",
+            "note",
+            "external_link",
+            "payload",
+            "status",
+            "submitted_at",
+        ]

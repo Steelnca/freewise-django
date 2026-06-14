@@ -71,9 +71,11 @@ class JobCreateView(generics.CreateAPIView):
 
 class JobDetailView(generics.RetrieveAPIView):
     """
-    GET /api/jobs/<id>/  → job detail (public)
+    GET /api/jobs/<public_id>/  → job detail (public)
     """
     permission_classes = [AllowAny]
+    lookup_field = "public_id"
+    lookup_url_kwarg = "public_id"
     serializer_class   = JobSerializer
     queryset           = Job.objects.select_related(
         'client__account__user', 'category'
@@ -82,10 +84,12 @@ class JobDetailView(generics.RetrieveAPIView):
 
 class JobUpdateView(generics.UpdateAPIView):
     """
-    PUT /api/jobs/<id>/edit/  → update/cancel a job (owner only)
+    PUT /api/jobs/<public_id>/edit/  → update/cancel a job (owner only)
     """
     permission_classes = [IsAuthenticated]
     serializer_class   = JobCreateSerializer
+    lookup_field = "public_id"
+    lookup_url_kwarg = "public_id"
 
     def get_queryset(self):
         account = getattr(self.request.user, 'account', None)

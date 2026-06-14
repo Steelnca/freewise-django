@@ -9,7 +9,7 @@ from django.conf import settings
 from django.utils import timezone
 from django.core.exceptions import ValidationError
 
-from core.mixins import LowercaseFieldsMixin
+from core.models.mixins import LowercaseFieldsMixin
 
 from .validators import username_regex, username_profanity, username_reserved_terms
 from .constants import USERNAME_MAX_LENGTH

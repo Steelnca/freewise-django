@@ -11,16 +11,19 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Sum
 from django.utils.translation import gettext_lazy as _
+from django.conf import settings
 
 from payments.constants import DEFAULT_CURRENCY
-from core.utils import _generate_prefixed_public_id
+from core.models.mixins import PublicIDMixin
 
-class Contract(models.Model):
+class Contract(PublicIDMixin, models.Model):
     """
     A contract is the agreement between a client and a freelancer.
 
     It can originate from a job board proposal or a future service-order flow.
     """
+
+    PUBLIC_ID_PREFIX = "fwc"
 
     class SourceType(models.TextChoices):
         JOB_BOARD = "JOB_BOARD", _("Job board")
@@ -31,9 +34,14 @@ class Contract(models.Model):
         PENDING_FUNDING = "PENDING_FUNDING", _("Pending funding")
         IN_PROGRESS = "IN_PROGRESS", _("In progress")
         SUSPENDED = "SUSPENDED", _("Suspended")
-        WITHDRAWN = "WITHDRAWN", _("Withdrawn")
+        ABANDONED = "ABANDONED", _("Abandoned")
         COMPLETED = "COMPLETED", _("Completed")
+        WITHDRAWN = "WITHDRAWN", _("Withdrawn")
         CANCELLED = "CANCELLED", _("Cancelled")
+
+    class MilestoneMode(models.TextChoices):
+        SINGLE = "SINGLE", _("Single")
+        MULTI = "MULTI", _("Multi")
 
     # --- Source of the contract ---
     source_type = models.CharField(
@@ -45,14 +53,14 @@ class Contract(models.Model):
         help_text=_("Where this contract started."),
     )
 
-    public_id = models.CharField(
-        max_length=16,
-        unique=True,
+    milestone_mode = models.CharField(
+        max_length=10,
+        choices=MilestoneMode.choices,
+        default=MilestoneMode.SINGLE,
         db_index=True,
-        editable=False,
-        verbose_name=_("public id"),
-        help_text=_("Public contract ID used in URLs and sharing."),
     )
+
+    collab_allowed = models.BooleanField(default=False)
 
     job = models.OneToOneField(
         "jobs.Job",
@@ -232,11 +240,6 @@ class Contract(models.Model):
                     }
                 )
 
-    def save(self, *args, **kwargs):
-        if not self.public_id:
-            self.public_id = _generate_prefixed_public_id("fwc", Contract)
-        super().save(*args, **kwargs)
-
     @property
     def display_name(self) -> str:
         """
@@ -287,8 +290,85 @@ class Contract(models.Model):
         total = self.milestones.filter(status=Milestone.Status.PENDING).aggregate(total=Sum("amount"))["total"]
         return total or Decimal("0.00")
 
+class MilestonePlan(PublicIDMixin, models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "DRAFT", _("Draft")
+        PROPOSED = "PROPOSED", _("Proposed")
+        APPROVED = "APPROVED", _("Approved")
+        REJECTED = "REJECTED", _("Rejected")
+        LOCKED = "LOCKED", _("Locked")
 
-class Milestone(models.Model):
+    PUBLIC_ID_PREFIX = "fwmp"
+    PUBLIC_ID_LENGTH_PREFIX = 12
+
+    proposal = models.ForeignKey(
+        "proposals.Proposal",
+        on_delete=models.CASCADE,
+        related_name="milestone_plans",
+    )
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="milestone_plans",
+    )
+
+    status = models.CharField(
+        max_length=12,
+        choices=Status.choices,
+        default=Status.DRAFT,
+        db_index=True,
+    )
+
+    note = models.TextField(blank=True, default="")
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    currency = models.CharField(max_length=3, default="DZD")
+    suggestion_enabled = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Plan {self.public_id}"
+
+class MilestonePlanItem(PublicIDMixin, models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "DRAFT", _("Draft")
+        PROPOSED = "PROPOSED", _("Proposed")
+        APPROVED = "APPROVED", _("Approved")
+        REJECTED = "REJECTED", _("Rejected")
+        CONVERTED = "CONVERTED", _("Converted")
+
+    PUBLIC_ID_PREFIX = "fwmpi"
+    PUBLIC_ID_LENGTH_PREFIX = 28
+
+    proposal = models.ForeignKey(
+        "proposals.Proposal",
+        on_delete=models.CASCADE,
+        related_name="milestone_proposals",
+    )
+    proposed_by = models.ForeignKey(
+        "users.User",
+        on_delete=models.PROTECT,
+        related_name="milestone_proposals",
+    )
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    currency = models.CharField(max_length=3, default=DEFAULT_CURRENCY)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    due_date = models.DateField()
+    order = models.PositiveSmallIntegerField(default=1)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.DRAFT,
+        db_index=True,
+    )
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+class Milestone(PublicIDMixin, models.Model):
     """
     Contract milestone.
 
@@ -302,8 +382,11 @@ class Milestone(models.Model):
         SUBMITTED = "SUBMITTED", _("Submitted")
         REVISION_REQUESTED = "REVISION_REQUESTED", _("Revision requested")
         DISPUTED = "DISPUTED", _("Disputed")
+        STALLED = "STALLED", _("Stalled")
         RELEASED = "RELEASED", _("Released")
         REFUNDED = "REFUNDED", _("Refunded")
+
+    PUBLIC_ID_PREFIX = "fwm"
 
     contract = models.ForeignKey(
         Contract,
@@ -313,13 +396,12 @@ class Milestone(models.Model):
         help_text=_("The contract this milestone belongs to."),
     )
 
-    public_id = models.CharField(
-        max_length=16,
-        unique=True,
-        db_index=True,
-        editable=False,
-        verbose_name=_("public id"),
-        help_text=_("Public milestone ID used in URLs and sharing."),
+    proposal = models.OneToOneField(
+        MilestonePlanItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="milestone",
     )
 
     title = models.CharField(
@@ -426,6 +508,14 @@ class Milestone(models.Model):
         help_text=_("When the freelancer submitted this milestone."),
     )
 
+    stalled_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("stalled at"),
+        help_text=_("When the milestone stalled/paused at."),
+    )
+
+
     approved_at = models.DateTimeField(
         null=True,
         blank=True,
@@ -516,13 +606,34 @@ class Milestone(models.Model):
                 {"currency": _("Milestone currency must match the contract currency.")}
             )
 
-    def save(self, *args, **kwargs):
-        if not self.public_id:
-            self.public_id = _generate_prefixed_public_id("fwm", Milestone)
-        super().save(*args, **kwargs)
+class MilestoneSubmission(PublicIDMixin, models.Model):
+    """
+    Immutable proof of work. Keep the original copy here.
+    """
 
+    PUBLIC_ID_PREFIX = "fwms"
+    PUBLIC_ID_LENGTH_PREFIX = 16
 
-class ContractEvent(models.Model):
+    milestone = models.ForeignKey(
+        Milestone,
+        on_delete=models.CASCADE,
+        related_name="submissions",
+    )
+
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="milestone_submissions",
+    )
+
+    note = models.TextField(blank=True, default="")
+    external_link = models.URLField(blank=True, default="")
+    payload = models.JSONField(default=dict, blank=True)
+
+    status = models.CharField(max_length=16, default="SUBMITTED", db_index=True)
+    submitted_at = models.DateTimeField(auto_now_add=True)
+
+class ContractEvent(PublicIDMixin, models.Model):
 
     class ContractEventType(models.TextChoices):
         CONTRACT_CREATED = "CONTRACT_CREATED", _("Contract created")
@@ -544,6 +655,8 @@ class ContractEvent(models.Model):
         MILESTONE_REFUNDED = "MILESTONE_REFUNDED", _("Milestone refunded")
         MILESTONE_DISPUTE_RESOLVED_TO_CLIENT = "MILESTONE_DISPUTE_RESOLVED_TO_CLIENT", _("Milestone dispute resolved to client")
         MILESTONE_DISPUTE_RESOLVED_TO_FREELANCER = "MILESTONE_DISPUTE_RESOLVED_TO_FREELANCER", _("Milestone dispute resolved to freelancer")
+
+    PUBLIC_ID_PREFIX = "fwce"
 
     contract = models.ForeignKey(
         Contract,

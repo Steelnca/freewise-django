@@ -31,7 +31,7 @@ class WalletAdmin(admin.ModelAdmin):
 
 @admin.register(WalletTransaction)
 class WalletTransactionAdmin(admin.ModelAdmin):
-    list_display = ("id", "wallet", "transaction_type", "status", "amount", "currency", "created_at")
+    list_display = ("id", "public_id", "wallet", "transaction_type", "status", "amount", "currency", "created_at")
     list_filter = ("transaction_type", "status", "currency")
     search_fields = ("wallet__user__username", "wallet__user__email", "idempotency_key", "reference_id")
     readonly_fields = [f.name for f in WalletTransaction._meta.fields]
@@ -45,7 +45,7 @@ class WalletTransactionAdmin(admin.ModelAdmin):
 
 @admin.register(EscrowHold)
 class EscrowHoldAdmin(admin.ModelAdmin):
-    list_display = ("id", "contract_reference", "wallet", "amount", "currency", "status", "created_at")
+    list_display = ("id", "public_id", "contract_reference", "wallet", "amount", "currency", "status", "created_at")
     list_filter = ("status", "currency")
     search_fields = ("contract_reference", "wallet__user__username", "wallet__user__email")
     readonly_fields = [f.name for f in EscrowHold._meta.fields]
@@ -59,7 +59,7 @@ class EscrowHoldAdmin(admin.ModelAdmin):
 
 @admin.register(Payout)
 class PayoutAdmin(admin.ModelAdmin):
-    list_display = ("id", "wallet", "amount", "currency", "status", "provider_name", "created_at")
+    list_display = ("id", "public_id", "wallet", "amount", "currency", "status", "provider_name", "created_at")
     list_filter = ("status", "provider_name", "currency")
     search_fields = ("wallet__user__username", "wallet__user__email", "provider_reference", "destination_label")
     readonly_fields = [f.name for f in Payout._meta.fields]

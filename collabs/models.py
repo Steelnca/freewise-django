@@ -1,100 +1,90 @@
+
+from decimal import Decimal
+
 from django.db import models
 from django.utils.translation import gettext_lazy as _
+from django.conf import settings
 
+from core.models.mixins import PublicIDMixin
 
-class CollabPost(models.Model):
+class CollabRequest(models.Model):
+    class Visibility(models.TextChoices):
+        PUBLIC = "PUBLIC", _("Public")
+        INVITE_ONLY = "INVITE_ONLY", _("Invite only")
 
     class Status(models.TextChoices):
-        OPEN   = 'OPEN',   _('Open')
-        CLOSED = 'CLOSED', _('Closed')
+        OPEN = "OPEN", _("Open")
+        FILLED = "FILLED", _("Filled")
+        CLOSED = "CLOSED", _("Closed")
+        CANCELLED = "CANCELLED", _("Cancelled")
 
-    posted_by = models.ForeignKey(
-        'freelancers.FreelancerProfile',
+    PUBLIC_ID_PREFIX = "fwcr"
+    PUBLIC_ID_LENGTH_PREFIX = 12
+
+    milestone = models.ForeignKey(
+        "contracts.Milestone",
         on_delete=models.CASCADE,
-        related_name='collab_posts',
+        related_name="collab_requests",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="collab_requests",
     )
 
-    # --- Details ---
-    title         = models.CharField(max_length=200)
-    description   = models.TextField()
-    skills_needed = models.ManyToManyField(
-        'freelancers.Skill',
-        blank=True,
-        related_name='collab_posts',
-    )
-    spots         = models.PositiveSmallIntegerField(default=1, help_text="How many collaborators are needed")  # how many collaborators needed
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    seat_label = models.CharField(max_length=120)
+    seats_needed = models.PositiveSmallIntegerField(default=1)
 
-    # --- Status ---
+    visibility = models.CharField(
+        max_length=16,
+        choices=Visibility.choices,
+        default=Visibility.PUBLIC,
+        db_index=True,
+    )
     status = models.CharField(
-        max_length=10,
+        max_length=12,
         choices=Status.choices,
         default=Status.OPEN,
         db_index=True,
     )
 
-    # --- Timestamps ---
+    seat_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    currency = models.CharField(max_length=3, default="DZD")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
-        ordering = ['-created_at']
-
-    def __str__(self):
-        return f"Collab: {self.title} by {self.posted_by}"
-
 
 class CollabApplication(models.Model):
-
     class Status(models.TextChoices):
-        PENDING  = 'PENDING',  _('Pending')
-        ACCEPTED = 'ACCEPTED', _('Accepted')
-        REJECTED = 'REJECTED', _('Rejected')
+        PENDING = "PENDING", _("Pending")
+        ACCEPTED = "ACCEPTED", _("Accepted")
+        REJECTED = "REJECTED", _("Rejected")
+        WITHDRAWN = "WITHDRAWN", _("Withdrawn")
 
-    collab_post = models.ForeignKey(
-        CollabPost,
+    PUBLIC_ID_PREFIX = "fwca"
+    PUBLIC_ID_LENGTH_PREFIX = 12
+
+    request = models.ForeignKey(
+        CollabRequest,
         on_delete=models.CASCADE,
-        related_name='applications',
+        related_name="applications",
     )
-    applicant = models.ForeignKey(
-        'freelancers.FreelancerProfile',
+    freelancer = models.ForeignKey(
+        "freelancers.FreelancerProfile",
         on_delete=models.CASCADE,
-        related_name='collab_applications',
+        related_name="collab_applications",
     )
 
-    message = models.TextField()
-    status  = models.CharField(
-        max_length=20,
+    note = models.TextField(blank=True, default="")
+    status = models.CharField(
+        max_length=12,
         choices=Status.choices,
         default=Status.PENDING,
         db_index=True,
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ['-created_at']
-        unique_together = ('collab_post', 'applicant')
-
-    def __str__(self):
-        return f"{self.applicant} → {self.collab_post} ({self.status})"
-
-
-class CollabMember(models.Model):
-    collab_post      = models.ForeignKey(
-        CollabPost,
-        on_delete=models.CASCADE,
-        related_name='members',
-    )
-    freelancer       = models.ForeignKey(
-        'freelancers.FreelancerProfile',
-        on_delete=models.CASCADE,
-        related_name='collab_memberships',
-    )
-    role_description = models.CharField(max_length=200, blank=True)
-    joined_at        = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        unique_together = ('collab_post', 'freelancer')
-
-    def __str__(self):
-        return f"{self.freelancer} in {self.collab_post}"
+    updated_at = models.DateTimeField(auto_now=True)

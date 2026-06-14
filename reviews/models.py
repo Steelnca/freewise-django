@@ -2,12 +2,15 @@ from django.db import models
 from django.utils.translation import gettext_lazy as _
 from django.core.validators import MinValueValidator, MaxValueValidator
 
+from core.models.mixins import PublicIDMixin
 
-class Review(models.Model):
+class Review(PublicIDMixin, models.Model):
     """
     Both sides review each other after a contract is completed.
     reviewer → reviewee (client reviews freelancer, freelancer reviews client).
     """
+
+    PUBLIC_ID_PREFIX = "fwr"
 
     contract = models.ForeignKey(
         'contracts.Contract',

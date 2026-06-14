@@ -24,12 +24,12 @@ def json_safe_dict(data: Optional[dict[str, Any]]) -> dict[str, Any]:
     return json_safe_value(data or {})
 
 
-def _random_public_code(length: int = 6) -> str:
+def _random_public_code(length) -> str:
     return "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(length))
 
 
-def _generate_prefixed_public_id(prefix: str, model_cls, field_name: str = "public_id") -> str:
+def _generate_prefixed_public_id(prefix: str, model_cls, length: int = 6, field_name: str = "public_id") -> str:
     while True:
-        candidate = f"{prefix}-{_random_public_code()}"
+        candidate = f"{prefix}-{_random_public_code(length)}"
         if not model_cls._base_manager.filter(**{field_name: candidate}).exists():
             return candidate

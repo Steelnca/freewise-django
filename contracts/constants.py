@@ -1,0 +1,5 @@
+from decimal import Decimal
+
+MAX_FIRST_MILESTONE_PERCENT = Decimal("35")
+MIN_LAST_MILESTONE_PERCENT = Decimal("15")
+MAX_MILESTONES = 10

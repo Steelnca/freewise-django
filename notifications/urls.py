@@ -6,6 +6,6 @@ urlpatterns = [
     path("", NotificationListView.as_view(), name="notification-list"),
     path("unread-count/", UnreadCountView.as_view(), name="notification-unread-count"),
     path("stream/", NotificationStreamView.as_view(), name="notification-stream"),
-    path("<int:pk>/read/", MarkReadView.as_view(), name="notification-read"),
+    path("<str:public_id>/read/", MarkReadView.as_view(), name="notification-read"),
     path("read-all/", MarkReadView.as_view(), name="notification-read-all"),
 ]

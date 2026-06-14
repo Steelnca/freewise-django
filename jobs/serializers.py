@@ -31,12 +31,12 @@ class JobSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Job
         fields = (
-            'id', 'client_username', 'client_slug',
+            'public_id', 'client_username', 'client_slug',
             'title', 'description',
             'category', 'category_id',
             'tags', 'tag_ids',
             'experience_level',
-            'budget_min', 'budget_max', 'deadline',
+            'budget_total', 'deadline',
             'status', 'proposal_count',
             'created_at',
         )
@@ -55,5 +55,5 @@ class JobCreateSerializer(serializers.ModelSerializer):
         model  = Job
         fields = (
             'title', 'description', 'category_id', 'tag_ids',
-            'experience_level', 'budget_min', 'budget_max', 'deadline',
+            'experience_level', 'budget_total', 'deadline',
         )

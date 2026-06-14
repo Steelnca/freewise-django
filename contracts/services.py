@@ -20,7 +20,7 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from payments.models import EscrowHold, Wallet
+from payments.models import EscrowHold, WalletTransaction
 from payments.services import (
     DEFAULT_CURRENCY as PAYMENTS_DEFAULT_CURRENCY,
     EscrowHoldError,
@@ -31,15 +31,16 @@ from payments.services import (
     release_escrow_hold_to_wallet,
     refund_escrow_hold,
     normalize_money,
+    milestone_has_settled_or_paid_payment,
 )
 
-from .models import Contract, Milestone, ContractEvent
+from .models import Contract, Milestone, ContractEvent, MilestoneSubmission, MilestonePlan, MilestonePlanItem
+from .constants import MAX_FIRST_MILESTONE_PERCENT, MAX_MILESTONES, MIN_LAST_MILESTONE_PERCENT
 
 TERMINAL_MILESTONE_STATUSES = {
     Milestone.Status.RELEASED,
     Milestone.Status.REFUNDED,
 }
-
 
 def contract_reference_for_milestone(milestone: Milestone) -> str:
     """
@@ -251,7 +252,8 @@ def submit_milestone(
     user,
     submission_note: str = "",
     submission_link: str = "",
-) -> Milestone:
+    payload: dict = {},
+) -> MilestoneSubmission:
     """
     Freelancer submits work for review.
     """
@@ -280,6 +282,17 @@ def submit_milestone(
     }:
         raise ValidationError({"status": _("This milestone cannot be submitted in its current state.")})
 
+    if not milestone_has_settled_or_paid_payment(milestone=milestone):
+        raise ValidationError({"status": _("This milestone has no settled or completed payment attempts.")})
+
+    submission = MilestoneSubmission.objects.create(
+        milestone=milestone,
+        submitted_by=user,
+        note=submission_note,
+        external_link=submission_link,
+        payload=payload or {},
+    )
+
     milestone.status = Milestone.Status.SUBMITTED
     milestone.submission_link = submission_link or milestone.submission_link
     milestone.submission_note = submission_note or milestone.submission_note
@@ -294,7 +307,7 @@ def submit_milestone(
         metadata={"milestone_public_id": milestone.public_id},
     )
 
-    return milestone
+    return submission
 
 
 @transaction.atomic
@@ -392,6 +405,9 @@ def approve_milestone(
 
     if milestone.status != Milestone.Status.SUBMITTED:
         raise ValidationError({"status": _("Only submitted milestones can be approved.")})
+
+    if not milestone_has_settled_or_paid_payment(milestone=milestone):
+        raise ValidationError({"status": _("This milestone has no settled or completed payment attempts.")})
 
     contract = milestone.contract
 
@@ -903,3 +919,106 @@ def resolve_dispute_to_client(*, milestone: Milestone, user, note: str = "") -> 
     )
 
     return milestone
+
+def _sum_plan_items(items):
+    return sum((item.amount for item in items), Decimal("0.00"))
+
+
+@transaction.atomic
+def validate_milestone_plan(plan: MilestonePlan):
+    items = list(plan.items.order_by("order", "created_at"))
+    if not items:
+        raise ValidationError({"detail": "Milestone plan must have at least one item."})
+
+    if len(items) > MAX_MILESTONES:
+        raise ValidationError({"detail": f"Maximum {MAX_MILESTONES} milestones allowed."})
+
+    total = _sum_plan_items(items)
+
+    if plan.proposal.job.milestone_mode == "SINGLE" and len(items) != 1:
+        raise ValidationError({"detail": "Single mode allows exactly one milestone."})
+
+    if len(items) > 1:
+        first_cap = (plan.proposal.job.budget_total or total) * MAX_FIRST_MILESTONE_PERCENT / Decimal("100")
+        last_floor = (plan.proposal.job.budget_total or total) * MIN_LAST_MILESTONE_PERCENT / Decimal("100")
+
+        if items[0].amount > first_cap:
+            raise ValidationError({"detail": "First milestone is too large."})
+        if items[-1].amount < last_floor:
+            raise ValidationError({"detail": "Last milestone is too small."})
+
+    if plan.proposal.job.pricing_mode == "FIXED" and plan.proposal.job.budget_total is not None:
+        if total != plan.proposal.job.budget_total:
+            raise ValidationError({"detail": "Milestones must equal the fixed budget total."})
+
+    plan.total_amount = total
+    plan.save(update_fields=["total_amount", "updated_at"])
+    return total
+
+
+@transaction.atomic
+def approve_milestone_plan(plan: MilestonePlan):
+    validate_milestone_plan(plan)
+    plan.status = MilestonePlan.Status.APPROVED
+    plan.save(update_fields=["status", "updated_at"])
+    return plan
+
+
+@transaction.atomic
+def create_contract_from_accepted_proposal(proposal, created_by):
+    """
+    Turn the accepted bid + approved milestone plan into a live contract.
+    """
+    plan = proposal.milestone_plans.filter(status=MilestonePlan.Status.APPROVED).order_by("created_at").first()
+    if not plan:
+        raise ValidationError({"detail": "No approved milestone plan found."})
+
+    total = validate_milestone_plan(plan)
+
+    contract = Contract.objects.create(
+        proposal=proposal,
+        client=proposal.job.client_profile,
+        freelancer=proposal.freelancer,
+        title=proposal.job.title,
+        status=Contract.Status.PENDING_APPROVAL,
+        milestone_mode=proposal.job.milestone_mode,
+        split_owner=proposal.job.split_owner,
+        collab_allowed=proposal.job.collab_allowed,
+        budget_total=proposal.job.budget_total or total,
+        agreed_price=total,
+    )
+
+    for item in plan.items.order_by("order", "created_at"):
+        milestone = Milestone.objects.create(
+            contract=contract,
+            source_item=item,
+            title=item.title,
+            description=item.description,
+            amount=item.amount,
+            due_date=item.due_date,
+            order=item.order,
+            status=Milestone.Status.PENDING,
+        )
+        item.status = MilestonePlanItem.Status.CONVERTED
+        item.save(update_fields=["status", "updated_at"])
+
+    contract.status = Contract.Status.ACTIVE
+    contract.active_at = timezone.now()
+    contract.save(update_fields=["status", "active_at", "updated_at"])
+    return contract
+
+
+# @transaction.atomic
+# def submit_milestone_work(*, milestone: Milestone, user, note: str = "", external_link: str = "", payload=None):
+#     submission = MilestoneSubmission.objects.create(
+#         milestone=milestone,
+#         submitted_by=user,
+#         note=note,
+#         external_link=external_link,
+#         payload=payload or {},
+#     )
+#     milestone.status = Milestone.Status.SUBMITTED
+#     milestone.submitted_at = timezone.now()
+#     milestone.save(update_fields=["status", "submitted_at", "updated_at"])
+#     return submission
+

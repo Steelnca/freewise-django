@@ -28,14 +28,14 @@ class MarkReadView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, pk=None):
+    def post(self, request, public_id=None):
         account = getattr(request.user, 'account', None)
         if not account:
             return Response({'detail': 'Account not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        if pk:
+        if public_id:
             try:
-                notif = Notification.objects.get(pk=pk, account=account)
+                notif = Notification.objects.get(public_id=public_id, account=account)
                 notif.is_read = True
                 notif.save(update_fields=['is_read'])
             except Notification.DoesNotExist:
@@ -108,20 +108,20 @@ class NotificationStreamView(APIView):
                 unread = (
                     Notification.objects.filter(account=account, is_read=False)
                     .order_by("created_at")
-                    .only("id", "type", "title", "message", "link", "is_read", "created_at")
+                    .only("public_id", "type", "title", "message", "link", "is_read", "created_at")
                 )
                 for notification in unread:
                     yield _sse(
                         "notification",
                         serialize_notification(notification),
-                        notification.id,
+                        notification.public_id,
                     )
 
                 # Live updates.
                 while True:
                     try:
                         payload = subscriber_queue.get(timeout=15)
-                        yield _sse("notification", payload, payload.get("id"))
+                        yield _sse("notification", payload, payload.get("public_id"))
                     except QueueEmpty:
                         # Keep the connection alive.
                         yield ": keep-alive\n\n"

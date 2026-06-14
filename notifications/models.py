@@ -1,8 +1,9 @@
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
+from core.models.mixins import PublicIDMixin
 
-class Notification(models.Model):
+class Notification(PublicIDMixin, models.Model):
 
     class Type(models.TextChoices):
         # Job flow
@@ -25,6 +26,9 @@ class Notification(models.Model):
         REVIEW_RECEIVED     = 'REVIEW_RECEIVED',      _('You received a review')
         # General
         GENERAL             = 'GENERAL',              _('General')
+
+    PUBLIC_ID_PREFIX = "fwn"
+    PUBLIC_ID_LENGTH_PREFIX = 28
 
     account = models.ForeignKey(
         'accounts.Account',

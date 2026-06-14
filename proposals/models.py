@@ -1,14 +1,17 @@
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
+from core.models.mixins import PublicIDMixin
 
-class Proposal(models.Model):
+class Proposal(PublicIDMixin, models.Model):
 
     class Status(models.TextChoices):
         PENDING   = 'PENDING',   _('Pending')
         ACCEPTED  = 'ACCEPTED',  _('Accepted')
         REJECTED  = 'REJECTED',  _('Rejected')
         WITHDRAWN = 'WITHDRAWN', _('Withdrawn')
+
+    PUBLIC_ID_PREFIX = "fwpp"
 
     # --- Relations ---
     job = models.ForeignKey(

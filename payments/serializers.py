@@ -21,7 +21,7 @@ class WalletTransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = WalletTransaction
         fields = (
-            "id",
+            "public_id",
             "transaction_type",
             "status",
             "amount",
@@ -46,7 +46,7 @@ class EscrowHoldSerializer(serializers.ModelSerializer):
     class Meta:
         model = EscrowHold
         fields = (
-            "id",
+            "public_id",
             "contract_reference",
             "amount",
             "currency",

@@ -17,7 +17,7 @@ class SubmitProposalView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, job_id):
+    def post(self, request, job_public_id):
         account  = getattr(request.user, 'account', None)
         if not account or not account.is_freelancer:
             return Response({'detail': 'Freelancer profile required.'}, status=status.HTTP_403_FORBIDDEN)
@@ -27,7 +27,7 @@ class SubmitProposalView(APIView):
             return Response({'detail': 'Freelancer profile not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         try:
-            job = Job.objects.get(pk=job_id, status=Job.Status.OPEN)
+            job = Job.objects.get(public_id=job_public_id, status=Job.Status.OPEN)
         except Job.DoesNotExist:
             return Response({'detail': 'Job not found or not open.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -74,7 +74,7 @@ class JobProposalsView(generics.ListAPIView):
         if not client:
             return Proposal.objects.none()
         return Proposal.objects.filter(
-            job__id=self.kwargs['job_id'],
+            job__public_id=self.kwargs['job_public_id'],
             job__client=client,
         ).select_related('freelancer__account__user', 'job')
 
@@ -86,7 +86,7 @@ class AcceptProposalView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, proposal_id):
+    def post(self, request, public_id):
         account = getattr(request.user, "account", None)
         client = getattr(account, "client_profile", None)
         if not client:
@@ -97,7 +97,7 @@ class AcceptProposalView(APIView):
 
         try:
             proposal = Proposal.objects.select_related("job", "freelancer").get(
-                pk=proposal_id,
+                public_id=public_id,
                 job__client=client,
                 status=Proposal.Status.PENDING,
             )
@@ -154,18 +154,19 @@ class AcceptProposalView(APIView):
 
 class WithdrawProposalView(APIView):
     """
-    POST /api/proposals/<proposal_id>/withdraw/  → freelancer withdraws their proposal
+    POST /api/proposals/<public_id>/withdraw/  → freelancer withdraws their proposal
     """
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, proposal_id):
+
+    def post(self, request, public_id):
         account    = getattr(request.user, 'account', None)
         freelancer = getattr(account, 'freelancer_profile', None)
         if not freelancer:
             return Response({'detail': 'Freelancer profile required.'}, status=status.HTTP_403_FORBIDDEN)
 
         try:
-            proposal = Proposal.objects.get(pk=proposal_id, freelancer=freelancer, status=Proposal.Status.PENDING)
+            proposal = Proposal.objects.get(public_id=public_id, freelancer=freelancer, status=Proposal.Status.PENDING)
         except Proposal.DoesNotExist:
             return Response({'detail': 'Proposal not found or cannot be withdrawn.'}, status=status.HTTP_404_NOT_FOUND)
 
