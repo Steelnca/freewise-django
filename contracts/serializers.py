@@ -14,6 +14,42 @@ from payments.services import refresh_payment_attempt_from_provider
 from .models import Contract, Milestone, ContractEvent, MilestonePlan, MilestonePlanItem, MilestoneSubmission
 
 
+class MilestonePlanItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MilestonePlanItem
+        fields = [
+            "public_id",
+            "title",
+            "description",
+            "amount",
+            "due_date",
+            "order",
+            "status",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["public_id", "status", "created_at", "updated_at"]
+
+class MilestonePlanSerializer(serializers.ModelSerializer):
+    items = MilestonePlanItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = MilestonePlan
+        fields = [
+            "public_id",
+            "proposal",
+            "created_by",
+            "status",
+            "note",
+            "total_amount",
+            "currency",
+            "suggestion_enabled",
+            "items",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["public_id", "total_amount", "created_at", "updated_at"]
+
 class MilestoneSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display", read_only=True)
     latest_payment_attempt_id = serializers.SerializerMethodField()
@@ -22,6 +58,10 @@ class MilestoneSerializer(serializers.ModelSerializer):
     latest_payment_attempt_checkout_url = serializers.SerializerMethodField()
     latest_payment_attempt_retryable = serializers.SerializerMethodField()
     source_item_public_id = serializers.CharField(source="source_item.public_id", read_only=True)
+    can_submit = serializers.SerializerMethodField()
+    can_fund = serializers.SerializerMethodField()
+    can_approve = serializers.SerializerMethodField()
+    can_request_revision = serializers.SerializerMethodField()
 
     class Meta:
         model = Milestone
@@ -58,6 +98,10 @@ class MilestoneSerializer(serializers.ModelSerializer):
             "latest_payment_attempt_provider_status",
             "latest_payment_attempt_checkout_url",
             "latest_payment_attempt_retryable",
+            "can_submit",
+            "can_fund",
+            "can_approve",
+            "can_request_revision",
         )
         read_only_fields = fields
 
@@ -103,9 +147,25 @@ class MilestoneSerializer(serializers.ModelSerializer):
             PaymentAttempt.InternalStatus.EXPIRED,
         }
 
+    def get_can_submit(self, obj):
+        return obj.status in [
+            Milestone.Status.FUNDED,
+            Milestone.Status.REVISION_REQUESTED,
+        ]
+
+    def get_can_fund(self, obj):
+        return obj.status == Milestone.Status.PENDING
+
+    def get_can_approve(self, obj):
+        return obj.status == Milestone.Status.SUBMITTED
+
+    def get_can_request_revision(self, obj):
+        return obj.status == Milestone.Status.SUBMITTED
+
 class ContractSerializer(serializers.ModelSerializer):
     client_username = serializers.CharField(source="client.account.user.username", read_only=True)
     freelancer_username = serializers.CharField(source="freelancer.account.user.username", read_only=True)
+    job_public_id = serializers.CharField(source="job.public_id", read_only=True, allow_null=True)
     job_title = serializers.CharField(source="job.title", read_only=True, allow_null=True)
     source_type_label = serializers.CharField(source="get_source_type_display", read_only=True)
     status_label = serializers.CharField(source="get_status_display", read_only=True)
@@ -130,13 +190,16 @@ class ContractSerializer(serializers.ModelSerializer):
     next_action = serializers.SerializerMethodField()
     next_action_milestone_public_id = serializers.SerializerMethodField()
 
+    active_milestone = serializers.SerializerMethodField()
+    source_plan = MilestonePlanSerializer(read_only=True)
+
     class Meta:
         model = Contract
         fields = (
             "public_id",
             "source_type",
             "source_type_label",
-            "job",
+            "job_public_id",
             "job_title",
             "proposal",
             "title",
@@ -173,6 +236,9 @@ class ContractSerializer(serializers.ModelSerializer):
             "withdrawn_at",
             "created_at",
             "updated_at",
+
+            "active_milestone",
+            "source_plan",
         )
         read_only_fields = fields
 
@@ -324,6 +390,23 @@ class ContractSerializer(serializers.ModelSerializer):
 
         return None
 
+    def get_active_milestone(self, obj):
+        milestone = (
+            obj.milestones
+            .exclude(
+                status__in=[
+                    Milestone.Status.RELEASED,
+                    Milestone.Status.REFUNDED,
+                ]
+            ).order_by("order").first()
+        )
+
+        if not milestone: return None
+
+        return MilestoneSerializer(
+            milestone, context=self.context,
+        ).data
+
 class MilestoneActionSerializer(serializers.Serializer):
     review_note = serializers.CharField(required=False, allow_blank=True, default="")
     revision_note = serializers.CharField(required=False, allow_blank=True, default="")
@@ -354,43 +437,6 @@ class ContractEventSerializer(serializers.ModelSerializer):
             "created_at",
         )
         read_only_fields = fields
-
-class MilestonePlanItemSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = MilestonePlanItem
-        fields = [
-            "public_id",
-            "proposal",
-            "title",
-            "description",
-            "amount",
-            "due_date",
-            "order",
-            "status",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = ["public_id", "status", "created_at", "updated_at"]
-
-class MilestonePlanSerializer(serializers.ModelSerializer):
-    items = MilestonePlanItemSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = MilestonePlan
-        fields = [
-            "public_id",
-            "proposal",
-            "created_by",
-            "status",
-            "note",
-            "total_amount",
-            "currency",
-            "suggestion_enabled",
-            "items",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = ["public_id", "total_amount", "created_at", "updated_at"]
 
 class MilestoneSubmissionSerializer(serializers.ModelSerializer):
     milestone_public_id = serializers.CharField(source="milestone.public_id", read_only=True)

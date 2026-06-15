@@ -12,6 +12,7 @@ from django.db import models
 from django.db.models import Sum
 from django.utils.translation import gettext_lazy as _
 from django.conf import settings
+from django.db.models import Q
 
 from payments.constants import DEFAULT_CURRENCY
 from core.models.mixins import PublicIDMixin
@@ -51,6 +52,14 @@ class Contract(PublicIDMixin, models.Model):
         db_index=True,
         verbose_name=_("source type"),
         help_text=_("Where this contract started."),
+    )
+
+    source_plan = models.OneToOneField(
+        "contracts.MilestonePlan",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="contract",
     )
 
     milestone_mode = models.CharField(
@@ -296,13 +305,25 @@ class MilestonePlan(PublicIDMixin, models.Model):
         PROPOSED = "PROPOSED", _("Proposed")
         APPROVED = "APPROVED", _("Approved")
         REJECTED = "REJECTED", _("Rejected")
-        LOCKED = "LOCKED", _("Locked")
+        CONVERTED = "CONVERTED", _("Converted")
+
+    class SourceRole(models.TextChoices):
+        CLIENT = "CLIENT", _("Client")
+        FREELANCER = "FREELANCER", _("Freelancer")
 
     PUBLIC_ID_PREFIX = "fwmp"
     PUBLIC_ID_LENGTH_PREFIX = 12
 
+    job = models.ForeignKey(
+        "jobs.Job",
+        on_delete=models.CASCADE,
+        related_name="milestone_plans",
+    )
+
     proposal = models.ForeignKey(
         "proposals.Proposal",
+        blank=True,
+        null=True,
         on_delete=models.CASCADE,
         related_name="milestone_plans",
     )
@@ -311,6 +332,13 @@ class MilestonePlan(PublicIDMixin, models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="milestone_plans",
+    )
+
+    source_role = models.CharField(
+        max_length=12,
+        choices=SourceRole.choices,
+        default=SourceRole.FREELANCER,
+        db_index=True,
     )
 
     status = models.CharField(
@@ -325,8 +353,35 @@ class MilestonePlan(PublicIDMixin, models.Model):
     currency = models.CharField(max_length=3, default="DZD")
     suggestion_enabled = models.BooleanField(default=True)
 
+    is_selected = models.BooleanField(
+        default=False,
+        verbose_name=_("Selected"),
+        help_text=_(
+            "Indicates whether this is the currently approved milestone plan "
+            "chosen for the job or proposal. Only one plan should be selected "
+            "at a time and selected plans may be used to generate contract milestones."
+        ),
+        db_index=True,
+    )
+
+    selected_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("Selected at"),
+        help_text=_("When the milestone plan was selected by the client."),
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["job"],
+                condition=Q(is_selected=True),
+                name="unique_selected_plan_per_job",
+            )
+        ]
 
     def __str__(self):
         return f"Plan {self.public_id}"
@@ -342,16 +397,12 @@ class MilestonePlanItem(PublicIDMixin, models.Model):
     PUBLIC_ID_PREFIX = "fwmpi"
     PUBLIC_ID_LENGTH_PREFIX = 28
 
-    proposal = models.ForeignKey(
-        "proposals.Proposal",
+    plan = models.ForeignKey(
+        MilestonePlan,
         on_delete=models.CASCADE,
-        related_name="milestone_proposals",
+        related_name="items",
     )
-    proposed_by = models.ForeignKey(
-        "users.User",
-        on_delete=models.PROTECT,
-        related_name="milestone_proposals",
-    )
+
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True, default="")
     currency = models.CharField(max_length=3, default=DEFAULT_CURRENCY)

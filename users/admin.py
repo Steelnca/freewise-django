@@ -6,5 +6,6 @@ from .models import User
 
 class UserAdmin(admin.ModelAdmin):
     model = User
+    search_fields = ['id', 'username']
 
 admin.site.register(User, UserAdmin)

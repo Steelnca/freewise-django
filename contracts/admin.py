@@ -7,7 +7,7 @@ This is for visibility and moderation, not casual editing.
 from django.contrib import admin
 from django.utils.translation import gettext_lazy as _
 
-from .models import Contract, Milestone
+from .models import Contract, Milestone, MilestonePlan, MilestonePlanItem
 from .services import resolve_dispute_to_client, resolve_dispute_to_freelancer
 
 
@@ -36,7 +36,6 @@ class MilestoneInline(admin.TabularInline):
 
     def has_change_permission(self, request, obj=None):
         return False
-
 
 @admin.register(Contract)
 class ContractAdmin(admin.ModelAdmin):
@@ -103,7 +102,6 @@ class ContractAdmin(admin.ModelAdmin):
         if obj is None:
             return self.readonly_fields
         return self.readonly_fields
-
 
 @admin.register(Milestone)
 class MilestoneAdmin(admin.ModelAdmin):
@@ -172,3 +170,193 @@ class MilestoneAdmin(admin.ModelAdmin):
     def resolve_to_client(self, request, queryset):
         for milestone in queryset:
             resolve_dispute_to_client(milestone=milestone, user=request.user)
+
+class MilestonePlanItemInline(admin.TabularInline):
+    model = MilestonePlanItem
+    extra = 0
+
+    fields = (
+        "order",
+        "title",
+        "amount",
+        "due_date",
+        "status",
+    )
+
+    readonly_fields = (
+        "created_at",
+        "updated_at",
+    )
+
+    ordering = ("order",)
+
+
+@admin.register(MilestonePlan)
+class MilestonePlanAdmin(admin.ModelAdmin):
+    list_display = (
+        "public_id",
+        "job",
+        "proposal",
+        "source_role",
+        "status",
+        "is_selected",
+        "total_amount",
+        "currency",
+        "created_by",
+        "created_at",
+    )
+
+    list_filter = (
+        "status",
+        "source_role",
+        "is_selected",
+        "currency",
+        "created_at",
+    )
+
+    search_fields = (
+        "public_id",
+        "job__title",
+        "proposal__public_id",
+        "created_by__username",
+    )
+
+    readonly_fields = (
+        "public_id",
+        "total_amount",
+        "selected_at",
+        "created_at",
+        "updated_at",
+    )
+
+    ordering = ("-created_at",)
+
+    autocomplete_fields = (
+        "job",
+        "proposal",
+        "created_by",
+    )
+
+    inlines = [MilestonePlanItemInline]
+
+    fieldsets = (
+        (
+            "Relations",
+            {
+                "fields": (
+                    "job",
+                    "proposal",
+                    "created_by",
+                )
+            },
+        ),
+        (
+            "Plan",
+            {
+                "fields": (
+                    "source_role",
+                    "status",
+                    "is_selected",
+                    "selected_at",
+                    "note",
+                    "suggestion_enabled",
+                )
+            },
+        ),
+        (
+            "Financial",
+            {
+                "fields": (
+                    "currency",
+                    "total_amount",
+                )
+            },
+        ),
+        (
+            "System",
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "public_id",
+                    "created_at",
+                    "updated_at",
+                ),
+            },
+        ),
+    )
+
+
+@admin.register(MilestonePlanItem)
+class MilestonePlanItemAdmin(admin.ModelAdmin):
+    list_display = (
+        "title",
+        "plan",
+        "order",
+        "amount",
+        "status",
+        "due_date",
+        "created_at",
+    )
+
+    list_filter = (
+        "status",
+        "created_at",
+        "due_date",
+    )
+
+    search_fields = (
+        "title",
+        "description",
+        "plan__public_id",
+        "plan__job__title",
+    )
+
+    readonly_fields = (
+        "public_id",
+        "created_at",
+        "updated_at",
+    )
+
+    autocomplete_fields = (
+        "plan",
+    )
+
+    ordering = (
+        "plan",
+        "order",
+    )
+
+    fieldsets = (
+        (
+            "Plan Item",
+            {
+                "fields": (
+                    "plan",
+                    "title",
+                    "description",
+                    "order",
+                )
+            },
+        ),
+        (
+            "Delivery",
+            {
+                "fields": (
+                    "amount",
+                    "due_date",
+                    "status",
+                )
+            },
+        ),
+        (
+            "System",
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "public_id",
+                    "created_at",
+                    "updated_at",
+                ),
+            },
+        ),
+    )

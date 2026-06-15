@@ -11,6 +11,7 @@ Rules:
 
 from __future__ import annotations
 
+from typing import Any, Dict, List, Optional
 from decimal import Decimal
 from typing import Optional
 
@@ -20,7 +21,10 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from payments.models import EscrowHold, WalletTransaction
+from proposals.models import Proposal
+from jobs.models import Job
+
+from payments.models import EscrowHold
 from payments.services import (
     DEFAULT_CURRENCY as PAYMENTS_DEFAULT_CURRENCY,
     EscrowHoldError,
@@ -110,6 +114,33 @@ def ensure_milestone_access(milestone: Milestone, user) -> None:
     ensure_party_access(milestone.contract, user)
 
 
+def _payload(request) -> Dict[str, Any]:
+    if isinstance(request.data, dict):
+        return request.data
+    return dict(request.data or {})
+
+
+def _to_decimal(value: Any) -> Decimal:
+    return Decimal(str(value))
+
+
+def _user_client_profile(user):
+    account = getattr(user, "account", None)
+    return getattr(account, "client_profile", None)
+
+
+def _user_freelancer_profile(user):
+    account = getattr(user, "account", None)
+    return getattr(account, "freelancer_profile", None)
+
+
+def _job_client_profile(job):
+    for attr in ("client", "client_profile", "owner", "client_user"):
+        value = getattr(job, attr, None)
+        if value is not None:
+            return value
+    return None
+
 def _set_contract_state(
     contract: Contract,
     status: str,
@@ -156,6 +187,219 @@ def _get_milestone_hold(milestone: Milestone):
         .filter(contract_reference=contract_reference_for_milestone(milestone))
         .first()
     )
+
+def _job_currency(job) -> str:
+    for attr in ("currency", "default_currency"):
+        value = getattr(job, attr, None)
+        if value:
+            return str(value)
+    return "DZD"
+
+
+def _ensure_contract_party_access(contract: Contract, user) -> None:
+    client = _user_client_profile(user)
+    freelancer = _user_freelancer_profile(user)
+
+    if client and contract.client_id == client.id:
+        return
+    if freelancer and contract.freelancer_id == freelancer.id:
+        return
+
+    raise PermissionDenied(_("You are not allowed to access this contract."))
+
+def _ensure_job_party_access(job: Job, user, proposal: Proposal | None = None) -> str:
+    client = _user_client_profile(user)
+    freelancer = _user_freelancer_profile(user)
+
+    if client and job.client_id == client.id:
+        return "client"
+
+    if proposal is not None and freelancer and proposal.freelancer_id == freelancer.id:
+        return "freelancer"
+
+    if freelancer and proposal is None and job.proposals.filter(freelancer=freelancer).exists():
+        return "freelancer"
+
+    raise PermissionDenied(_("You are not allowed to access this job plan."))
+
+def _ensure_proposal_party_access(proposal: Proposal, user) -> None:
+    client = _user_client_profile(user)
+    freelancer = _user_freelancer_profile(user)
+    job_client = _job_client_profile(proposal.job)
+
+    if client and job_client and getattr(job_client, "id", None) == client.id:
+        return
+    if freelancer and proposal.freelancer_id == freelancer.id:
+        return
+
+    raise PermissionDenied(_("You are not allowed to access this proposal."))
+
+
+def _item_source_for_user(user) -> str:
+    if _user_client_profile(user):
+        return MilestonePlanItem.Source.CLIENT
+    return MilestonePlanItem.Source.FREELANCER
+
+
+def _sum_items(items: List[MilestonePlanItem]) -> Decimal:
+    total = Decimal("0.00")
+    for item in items:
+        total += item.amount
+    return total
+
+
+def _plan_items_payload(items_raw: Any) -> List[Dict[str, Any]]:
+    if not isinstance(items_raw, list):
+        raise ValidationError({"items": _("Milestone items must be a list.")})
+
+    items: List[Dict[str, Any]] = []
+    for index, raw in enumerate(items_raw, start=1):
+        if not isinstance(raw, dict):
+            raise ValidationError({"items": _("Each milestone item must be an object.")})
+
+        title = str(raw.get("title") or "").strip()
+        amount_raw = raw.get("amount")
+        due_date = raw.get("due_date")
+
+        if not title:
+            raise ValidationError({"items": _("Each milestone item must have a title.")})
+        if amount_raw in (None, ""):
+            raise ValidationError({"items": _("Each milestone item must have an amount.")})
+        if not due_date:
+            raise ValidationError({"items": _("Each milestone item must have a due date.")})
+
+        items.append(
+            {
+                "title": title,
+                "description": str(raw.get("description") or "").strip(),
+                "amount": _to_decimal(amount_raw),
+                "due_date": due_date,
+                "order": int(raw.get("order") or index),
+                "source": str(raw.get("source") or "").upper().strip(),
+                "metadata": raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {},
+            }
+        )
+
+    return items
+
+
+def _replace_plan_items(plan: MilestonePlan, items_payload: List[Dict[str, Any]]) -> List[MilestonePlanItem]:
+    plan.items.all().delete()
+
+    created: List[MilestonePlanItem] = []
+    for item_data in items_payload:
+        item = MilestonePlanItem.objects.create(
+            plan=plan,
+            title=item_data["title"],
+            description=item_data["description"],
+            amount=item_data["amount"],
+            due_date=item_data["due_date"],
+            order=item_data["order"],
+            source=item_data["source"],
+            status=MilestonePlanItem.Status.DRAFT,
+            metadata=item_data["metadata"],
+        )
+        created.append(item)
+
+    return created
+
+
+def _validate_plan_rules(plan: MilestonePlan) -> Decimal:
+    items = list(plan.items.order_by("order", "created_at"))
+    total = _sum_items(items)
+
+    if not items:
+        raise ValidationError({"detail": _("Milestone plan must contain at least one item.")})
+
+    job = plan.job
+    milestone_mode = getattr(job, "milestone_mode", "SINGLE")
+    pricing_mode = getattr(job, "pricing_mode", "NEGOTIABLE")
+    budget_total = getattr(job, "budget_total", None)
+
+    if milestone_mode == "SINGLE" and len(items) != 1:
+        raise ValidationError({"detail": _("Single milestone mode allows exactly one item.")})
+
+    if len(items) > 1:
+        basis = budget_total or total
+        first_cap = basis * MAX_FIRST_MILESTONE_PERCENT / Decimal("100")
+        last_floor = basis * MIN_LAST_MILESTONE_PERCENT / Decimal("100")
+
+        if items[0].amount > first_cap:
+            raise ValidationError({"detail": _("The first milestone is too large.")})
+        if items[-1].amount < last_floor:
+            raise ValidationError({"detail": _("The last milestone is too small.")})
+
+    if pricing_mode == "FIXED" and budget_total is not None:
+        if total != budget_total:
+            raise ValidationError({"detail": _("Milestones must equal the fixed budget total.")})
+
+    plan.total_amount = total
+    plan.save(update_fields=["total_amount", "updated_at"])
+    return total
+
+
+def _get_or_create_active_plan(*, job: Job, proposal: Proposal | None, created_by, source_role: str) -> MilestonePlan:
+    active_plan = (
+        MilestonePlan.objects.filter(
+            job=job,
+            proposal=proposal,
+            status__in=[MilestonePlan.Status.DRAFT, MilestonePlan.Status.PROPOSED],
+        )
+        .order_by("-created_at")
+        .first()
+    )
+
+    if active_plan:
+        return active_plan
+
+    return MilestonePlan.objects.create(
+        job=job,
+        proposal=proposal,
+        created_by=created_by,
+        source_role=source_role,
+        status=MilestonePlan.Status.DRAFT,
+        suggestion_enabled=True,
+        currency=_job_currency(job),
+    )
+
+def _create_contract_from_approved_plan(proposal: Proposal, plan: MilestonePlan, created_by) -> Contract:
+    total = _validate_plan_rules(plan)
+    job = proposal.job
+    client = _job_client_profile(job)
+
+    if client is None:
+        raise ValidationError({"detail": _("Job client profile could not be resolved.")})
+
+    contract = Contract.objects.create(
+        proposal=proposal,
+        client=client,
+        freelancer=proposal.freelancer,
+        title=getattr(job, "title", "") or getattr(proposal, "title", "") or _("Contract"),
+        notes=getattr(proposal, "cover_letter", "") or "",
+        status=Contract.Status.ACTIVE,
+        milestone_mode=getattr(job, "milestone_mode", Contract.MilestoneMode.SINGLE),
+        split_owner=getattr(job, "split_owner", Contract.SplitOwner.CLIENT),
+        collab_allowed=getattr(job, "collab_allowed", False),
+        budget_total=getattr(job, "budget_total", None) or total,
+        agreed_price=total,
+        active_at=timezone.now(),
+    )
+
+    for item in plan.items.order_by("order", "created_at"):
+        Milestone.objects.create(
+            contract=contract,
+            source_item=item,
+            title=item.title,
+            description=item.description,
+            amount=item.amount,
+            due_date=item.due_date,
+            order=item.order,
+            status=Milestone.Status.PENDING,
+        )
+        item.status = MilestonePlanItem.Status.CONVERTED
+        item.save(update_fields=["status", "updated_at"])
+
+    return contract
 
 
 @transaction.atomic
@@ -989,7 +1233,7 @@ def create_contract_from_accepted_proposal(proposal, created_by):
     )
 
     for item in plan.items.order_by("order", "created_at"):
-        milestone = Milestone.objects.create(
+        Milestone.objects.create(
             contract=contract,
             source_item=item,
             title=item.title,
@@ -1008,17 +1252,118 @@ def create_contract_from_accepted_proposal(proposal, created_by):
     return contract
 
 
-# @transaction.atomic
-# def submit_milestone_work(*, milestone: Milestone, user, note: str = "", external_link: str = "", payload=None):
-#     submission = MilestoneSubmission.objects.create(
-#         milestone=milestone,
-#         submitted_by=user,
-#         note=note,
-#         external_link=external_link,
-#         payload=payload or {},
-#     )
-#     milestone.status = Milestone.Status.SUBMITTED
-#     milestone.submitted_at = timezone.now()
-#     milestone.save(update_fields=["status", "submitted_at", "updated_at"])
-#     return submission
+@transaction.atomic
+def create_contract_from_selected_plan(*, job, plan, proposal=None, created_by=None) -> Contract:
+    total = _validate_plan_rules(plan)
 
+    client = _job_client_profile(job)
+    if client is None:
+        raise ValidationError({"detail": _("Job client profile could not be resolved.")})
+
+    freelancer = None
+    if proposal is not None:
+        freelancer = proposal.freelancer
+    elif getattr(job, "proposals", None) is not None:
+        accepted = job.proposals.filter(status=Proposal.Status.ACCEPTED).order_by("-created_at").first()
+        if accepted:
+            freelancer = accepted.freelancer
+            proposal = accepted
+
+    if freelancer is None:
+        raise ValidationError({"detail": _("Accepted proposal or freelancer could not be resolved.")})
+
+    contract = Contract.objects.create(
+        proposal=proposal,
+        client=client,
+        freelancer=freelancer,
+        title=getattr(job, "title", "") or _("Contract"),
+        notes="",
+        status=Contract.Status.ACTIVE,
+        milestone_mode=getattr(job, "milestone_mode", Contract.MilestoneMode.SINGLE),
+        split_owner=getattr(job, "split_owner", Contract.SplitOwner.CLIENT),
+        collab_allowed=getattr(job, "collab_allowed", False),
+        budget_total=getattr(job, "budget_total", None) or total,
+        agreed_price=total,
+        source_plan=plan if hasattr(Contract, "source_plan") else None,
+        active_at=timezone.now(),
+    )
+
+    for item in plan.items.order_by("order", "created_at"):
+        milestone = Milestone.objects.create(
+            contract=contract,
+            source_item=item,
+            title=item.title,
+            description=item.description,
+            amount=item.amount,
+            due_date=item.due_date,
+            order=item.order,
+            status=Milestone.Status.PENDING,
+        )
+        item.status = MilestonePlanItem.Status.CONVERTED
+        item.save(update_fields=["status", "updated_at"])
+
+    log_contract_event(
+        contract=contract,
+        event_type=ContractEvent.ContractEventType.CONTRACT_CREATED,
+        actor=created_by,
+        metadata={
+            "job_public_id": job.public_id,
+            "plan_public_id": plan.public_id,
+            "proposal_public_id": getattr(proposal, "public_id", None),
+        },
+    )
+
+    return contract
+
+@transaction.atomic
+def create_contract_from_selected_plan(*, job, plan: MilestonePlan, proposal, created_by=None) -> Contract:
+    if plan.job_id != job.id:
+        raise ValidationError({"detail": _("Milestone plan does not belong to this job.")})
+
+    if plan.status != MilestonePlan.Status.APPROVED:
+        raise ValidationError({"detail": _("Only approved plans can create a contract.")})
+
+    if not plan.is_selected:
+        raise ValidationError({"detail": _("Select a milestone plan before creating the contract.")})
+
+    total = _validate_plan_rules(plan)
+
+    client = _job_client_profile(job)
+    if client is None:
+        raise ValidationError({"detail": _("Job client profile could not be resolved.")})
+
+    if proposal is None:
+        raise ValidationError({"detail": _("An accepted proposal is required.")})
+
+    contract = Contract.objects.create(
+        job=job,
+        proposal=proposal,
+        client=client,
+        freelancer=proposal.freelancer,
+        title=getattr(job, "title", "") or _("Contract"),
+        notes="",
+        status=Contract.Status.PENDING_FUNDING,
+        milestone_mode=getattr(job, "milestone_mode", Contract.MilestoneMode.SINGLE),
+        split_owner=getattr(job, "split_owner", Contract.SplitOwner.CLIENT),
+        collab_allowed=getattr(job, "collab_allowed", False),
+        budget_total=getattr(job, "budget_total", None) or total,
+        agreed_price=total,
+        source_plan=plan if hasattr(Contract, "source_plan") else None,
+        deadline=proposal.job.deadline,
+    )
+
+    for item in plan.items.order_by("order", "created_at"):
+        milestone = Milestone.objects.create(
+            contract=contract,
+            source_item=item,
+            title=item.title,
+            description=item.description,
+            amount=item.amount,
+            due_date=item.due_date,
+            order=item.order,
+            status=Milestone.Status.PENDING,
+        )
+        item.status = MilestonePlanItem.Status.CONVERTED
+        item.save(update_fields=["status", "updated_at"])
+
+    return contract

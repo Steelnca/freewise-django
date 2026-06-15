@@ -1,12 +1,15 @@
-from django.utils import timezone
 
 from rest_framework import status, generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
+from django.db import transaction
+
 from jobs.models import Job
-from contracts.models import Contract, Milestone
+from contracts.models import MilestonePlan
+from contracts.services import create_contract_from_selected_plan
+
 from .models import Proposal
 from .serializers import ProposalSerializer, ProposalCreateSerializer
 
@@ -80,12 +83,9 @@ class JobProposalsView(generics.ListAPIView):
 
 
 class AcceptProposalView(APIView):
-    """
-    POST /api/proposals/<proposal_id>/accept/
-    Client accepts a proposal → creates Contract + Milestone.
-    """
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, public_id):
         account = getattr(request.user, "account", None)
         client = getattr(account, "client_profile", None)
@@ -113,6 +113,21 @@ class AcceptProposalView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        selected_plan = (
+            proposal.job.milestone_plans.filter(
+                is_selected=True,
+                status=MilestonePlan.Status.APPROVED,
+            )
+            .order_by("-created_at")
+            .first()
+        )
+
+        if not selected_plan:
+            return Response(
+                {"detail": "Approve and select a milestone plan before accepting this proposal."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         proposal.status = Proposal.Status.ACCEPTED
         proposal.save(update_fields=["status"])
 
@@ -123,30 +138,17 @@ class AcceptProposalView(APIView):
         proposal.job.status = Job.Status.IN_PROGRESS
         proposal.job.save(update_fields=["status"])
 
-        contract = Contract.objects.create(
+        contract = create_contract_from_selected_plan(
             job=proposal.job,
+            plan=selected_plan,
             proposal=proposal,
-            client=client,
-            freelancer=proposal.freelancer,
-            agreed_price=proposal.proposed_price,
-            deadline=proposal.job.deadline or timezone.now().date(),
-            status=Contract.Status.PENDING_FUNDING,
-        )
-
-        milestone = Milestone.objects.create(
-            contract=contract,
-            title="Full project delivery",
-            amount=proposal.proposed_price,
-            due_date=contract.deadline,
-            order=1,
-            status=Milestone.Status.PENDING,
+            created_by=request.user,
         )
 
         return Response(
             {
                 "detail": "Proposal accepted. Contract created.",
                 "contract_public_id": contract.public_id,
-                "milestone_public_id": milestone.public_id,
             },
             status=status.HTTP_201_CREATED,
         )

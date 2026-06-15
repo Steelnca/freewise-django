@@ -38,8 +38,8 @@ class Job(PublicIDMixin, models.Model):
         CANCELLED   = 'CANCELLED',   _('Cancelled')
 
     class ExperienceLevel(models.TextChoices):
-        ENTRY    = 'ENTRY',    _('Entry Level')
-        MID      = 'MID',      _('Mid Level')
+        ENTRY    = 'BEGINNER',    _('Beginner')
+        MID      = 'INTERMEDIATE', _('Intermediate')
         EXPERT   = 'EXPERT',   _('Expert')
 
     class PricingMode(models.TextChoices):
@@ -75,7 +75,7 @@ class Job(PublicIDMixin, models.Model):
     )
     tags             = models.ManyToManyField(Tag, blank=True, related_name='jobs')
     experience_level = models.CharField(
-        max_length=10,
+        max_length=32,
         choices=ExperienceLevel.choices,
         default=ExperienceLevel.MID,
     )
@@ -113,6 +113,7 @@ class Job(PublicIDMixin, models.Model):
     )
 
     collab_allowed = models.BooleanField(default=False)
+    allow_milestone_suggestions = models.BooleanField(default=True)
 
     budget_total = models.DecimalField(
         max_digits=14,
