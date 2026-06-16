@@ -7,6 +7,7 @@ class Proposal(PublicIDMixin, models.Model):
 
     class Status(models.TextChoices):
         PENDING   = 'PENDING',   _('Pending')
+        AWAITING_PLAN = 'AWAITING_PLAN', _('Awaiting Plan')
         ACCEPTED  = 'ACCEPTED',  _('Accepted')
         REJECTED  = 'REJECTED',  _('Rejected')
         WITHDRAWN = 'WITHDRAWN', _('Withdrawn')

@@ -89,6 +89,7 @@ class JobSerializer(serializers.ModelSerializer):
     tags = TagSerializer(many=True, read_only=True)
     proposal_count = serializers.IntegerField(source="proposals.count", read_only=True)
     milestone_plans = MilestonePlanSerializer(many=True, read_only=True)
+    allow_milestone_suggestions = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = Job
@@ -110,6 +111,7 @@ class JobSerializer(serializers.ModelSerializer):
             "status",
             "proposal_count",
             "milestone_plans",
+            "allow_milestone_suggestions",
             "created_at",
             "updated_at",
         )
@@ -146,7 +148,15 @@ class JobWriteSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         plan = attrs.get("milestone_plan")
-        budget_total = attrs.get("budget_total")
+        allow_suggestions = attrs.get(
+            "allow_milestone_suggestions",
+            getattr(self.instance, "allow_milestone_suggestions", True),
+        )
+
+        if not plan and not allow_suggestions:
+            raise serializers.ValidationError({
+                "allow_milestone_suggestions": "Enable suggestions when no milestone plan is provided."
+            })
 
         if plan:
             items = plan.get("items") or []
@@ -185,7 +195,7 @@ class JobWriteSerializer(serializers.ModelSerializer):
             )
             attrs["split_owner"] = Job.SplitOwner.CLIENT
         else:
-            if budget_total in (None, ""):
+            if attrs["budget_total"] in (None, ""):
                 raise serializers.ValidationError(
                     {"budget_total": "Enter a total deal price when no milestone plan is provided."}
                 )

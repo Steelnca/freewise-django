@@ -25,12 +25,11 @@ from proposals.models import Proposal
 from .models import Contract, Milestone, MilestonePlan, MilestonePlanItem, MilestoneSubmission
 from .serializers import ContractSerializer, MilestoneActionSerializer, MilestoneSerializer, MilestoneSubmissionSerializer, MilestonePlanSerializer, MilestonePlanItemSerializer, ContractEventSerializer
 from .services import (
-    create_contract_from_accepted_proposal,
     cancel_contract,
+    create_contract_from_selected_plan,
     ensure_party_access,
     open_dispute,
     request_revision,
-    create_contract_from_selected_plan,
     approve_milestone_plan,
     submit_milestone,
     _payload,
@@ -138,13 +137,49 @@ class MilestonePlanCreateView(APIView):
 
         plan.note = str(payload.get("note") or "").strip()
         plan.suggestion_enabled = bool(payload.get("suggestion_enabled", True))
-        plan.status = MilestonePlan.Status.PROPOSED if (plan.note or items_payload) else MilestonePlan.Status.DRAFT
         plan.currency = _job_currency(job)
         plan.source_role = MilestonePlan.SourceRole.CLIENT if role == "client" else MilestonePlan.SourceRole.FREELANCER
-        plan.save(update_fields=["note", "suggestion_enabled", "status", "currency", "source_role", "updated_at"])
+        plan.save(update_fields=["note", "suggestion_enabled", "currency", "source_role", "updated_at"])
 
         created_items = _replace_plan_items(plan, items_payload)
         _validate_plan_rules(plan)
+
+        if proposal is None and role == "client":
+            plan.status = MilestonePlan.Status.APPROVED
+            plan.is_selected = True
+            update_fields = ["status", "is_selected", "updated_at"]
+
+            if hasattr(plan, "selected_at"):
+                plan.selected_at = timezone.now()
+                update_fields.insert(2, "selected_at")
+
+            plan.save(update_fields=update_fields)
+
+            accepted_proposal = (
+                Proposal.objects.filter(job=job, status=Proposal.Status.ACCEPTED)
+                .order_by("-created_at")
+                .first()
+            )
+
+            if accepted_proposal:
+                contract = create_contract_from_selected_plan(
+                    job=job,
+                    plan=plan,
+                    proposal=accepted_proposal,
+                    created_by=request.user,
+                )
+                return Response(ContractSerializer(contract).data, status=status.HTTP_201_CREATED)
+
+            return Response(
+                {
+                    "plan": MilestonePlanSerializer(plan).data,
+                    "items": MilestonePlanItemSerializer(created_items, many=True).data,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+
+        plan.status = MilestonePlan.Status.PROPOSED if (plan.note or items_payload) else MilestonePlan.Status.DRAFT
+        plan.save(update_fields=["status", "updated_at"])
 
         return Response(
             {
@@ -153,57 +188,6 @@ class MilestonePlanCreateView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
-
-class MilestonePlanDetailView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get_object(self, public_id: str) -> MilestonePlan:
-        return get_object_or_404(
-            MilestonePlan.objects.select_related("proposal", "created_by", "proposal__job")
-            .prefetch_related("items"),
-            public_id=public_id,
-        )
-
-    def get(self, request, public_id: str):
-        plan = self.get_object(public_id)
-        _ensure_proposal_party_access(plan.proposal, request.user)
-        return Response(MilestonePlanSerializer(plan).data, status=status.HTTP_200_OK)
-
-    @transaction.atomic
-    def patch(self, request, public_id: str):
-        plan = self.get_object(public_id)
-        _ensure_proposal_party_access(plan.proposal, request.user)
-
-        if plan.status in {MilestonePlan.Status.APPROVED, MilestonePlan.Status.LOCKED}:
-            raise ValidationError({"detail": _("Approved plans cannot be edited.")})
-
-        payload = _payload(request)
-        if "note" in payload:
-            plan.note = str(payload.get("note") or "").strip()
-        if "suggestion_enabled" in payload:
-            plan.suggestion_enabled = bool(payload.get("suggestion_enabled"))
-        if "items" in payload:
-            items_payload = _plan_items_payload(payload.get("items"))
-            _replace_plan_items(plan, items_payload)
-
-        if payload.get("status") in MilestonePlan.Status.values:
-            plan.status = payload.get("status")
-
-        plan.save(update_fields=["note", "suggestion_enabled", "status", "updated_at"])
-        _validate_plan_rules(plan)
-
-        return Response(MilestonePlanSerializer(plan).data, status=status.HTTP_200_OK)
-
-    @transaction.atomic
-    def delete(self, request, public_id: str):
-        plan = self.get_object(public_id)
-        _ensure_proposal_party_access(plan.proposal, request.user)
-
-        if plan.status in {MilestonePlan.Status.APPROVED, MilestonePlan.Status.LOCKED}:
-            raise ValidationError({"detail": _("Approved plans cannot be deleted.")})
-
-        plan.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
 
 class MilestoneSubmissionCreateView(APIView):
     permission_classes = [IsAuthenticated]
@@ -278,58 +262,79 @@ class MilestonePlanApproveView(APIView):
     @transaction.atomic
     def post(self, request, public_id: str):
         plan = get_object_or_404(
-            MilestonePlan.objects.select_related("job", "proposal", "created_by", "job__client__account__user")
-            .prefetch_related("items"),
+            MilestonePlan.objects.select_related(
+                "job",
+                "proposal",
+                "created_by",
+                "job__client__account__user",
+            ).prefetch_related("items"),
             public_id=public_id,
         )
+
         _ensure_job_party_access(plan.job, request.user, proposal=plan.proposal)
 
-        approve_milestone_plan(plan)
+        # Client-created plans should already be approved at creation time.
+        # This endpoint still works as a safety net and for freelancer plans.
+        if plan.status not in {MilestonePlan.Status.APPROVED, MilestonePlan.Status.LOCKED}:
+            approve_milestone_plan(plan)
 
-        # Keep one selected plan per job.
         MilestonePlan.objects.filter(job=plan.job).exclude(pk=plan.pk).update(is_selected=False)
+
         if not plan.is_selected:
             plan.is_selected = True
-            plan.save(update_fields=["is_selected", "updated_at"])
+            update_fields = ["is_selected", "updated_at"]
 
-        accepted_proposal = plan.proposal
-        if accepted_proposal is None:
-            accepted_proposal = (
-                Proposal.objects.filter(job=plan.job, status=Proposal.Status.ACCEPTED)
-                .order_by("-created_at")
-                .first()
+            if hasattr(plan, "selected_at"):
+                from django.utils import timezone
+                plan.selected_at = timezone.now()
+                update_fields.insert(1, "selected_at")
+
+            plan.save(update_fields=update_fields)
+
+        accepted_proposal = plan.proposal or (
+            Proposal.objects.filter(
+                job=plan.job,
+                status=Proposal.Status.ACCEPTED,
+            )
+            .order_by("-created_at")
+            .first()
+        )
+
+        if not accepted_proposal or accepted_proposal.status != Proposal.Status.ACCEPTED:
+            return Response(
+                {
+                    "detail": _("Milestone plan approved and selected. Waiting for accepted proposal."),
+                    "plan": MilestonePlanSerializer(plan).data,
+                },
+                status=status.HTTP_200_OK,
             )
 
-        # If the job-level plan is meant to be used for the accepted proposal,
-        # attach it so contract creation can see it.
-        if accepted_proposal and plan.proposal_id is None:
-            plan.proposal = accepted_proposal
-            plan.save(update_fields=["proposal", "updated_at"])
+        contract = getattr(accepted_proposal, "contract", None)
 
-        if accepted_proposal and accepted_proposal.status == Proposal.Status.ACCEPTED:
-            contract = getattr(accepted_proposal, "contract", None)
-
-            if contract is None:
-                contract = create_contract_from_accepted_proposal(
-                    accepted_proposal,
-                    created_by=request.user,
-                )
-                return Response(ContractSerializer(contract).data, status=status.HTTP_201_CREATED)
-
-            total = _validate_plan_rules(plan)
-            contract.agreed_price = total
-            if not getattr(contract, "budget_total", None):
-                contract.budget_total = total
-            if hasattr(contract, "source_plan"):
-                contract.source_plan = plan
-            contract.save(
-                update_fields=["agreed_price", "budget_total", "source_plan", "updated_at"]
-                if hasattr(contract, "source_plan")
-                else ["agreed_price", "budget_total", "updated_at"]
+        if contract is None:
+            contract = create_contract_from_selected_plan(
+                job=plan.job,
+                plan=plan,
+                proposal=accepted_proposal,
+                created_by=request.user,
             )
-            return Response(ContractSerializer(contract).data, status=status.HTTP_200_OK)
+            return Response(ContractSerializer(contract).data, status=status.HTTP_201_CREATED)
 
-        return Response(MilestonePlanSerializer(plan).data, status=status.HTTP_200_OK)
+        total = _validate_plan_rules(plan)
+        contract.agreed_price = total
+
+        update_fields = ["agreed_price", "updated_at"]
+
+        if hasattr(contract, "budget_total") and not contract.budget_total:
+            contract.budget_total = total
+            update_fields.append("budget_total")
+
+        if hasattr(contract, "source_plan"):
+            contract.source_plan = plan
+            update_fields.append("source_plan")
+
+        contract.save(update_fields=update_fields)
+        return Response(ContractSerializer(contract).data, status=status.HTTP_200_OK)
 
 class DisputeMilestoneView(APIView):
     """
