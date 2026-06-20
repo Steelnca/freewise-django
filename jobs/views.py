@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from django.core.exceptions import PermissionDenied
-from django.db.models import Count
-from django.shortcuts import get_object_or_404
 from rest_framework import filters, generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from django.core.exceptions import PermissionDenied
+from django.db.models import Count
+from django.shortcuts import get_object_or_404
+from django.utils.translation import gettext as _
+
+from proposals.models import Proposal
+from proposals.serializers import ProposalSerializer, ProposalCreateSerializer
 
 from .models import Category, Job, Tag
 from .serializers import (
@@ -14,6 +19,7 @@ from .serializers import (
     JobSerializer,
     JobWriteSerializer,
     TagSerializer,
+    JobApplicantWorkspaceSerializer,
 )
 
 
@@ -42,7 +48,7 @@ class JobListView(generics.ListAPIView):
             Job.objects.filter(status=Job.Status.OPEN)
             .select_related("client__account__user", "category")
             .prefetch_related("tags", "proposals", "milestone_plans", "milestone_plans__items")
-            .annotate(proposal_count_value=Count("proposals", distinct=True))
+            .annotate(proposal_count=Count("proposals", distinct=True))
         )
 
         category = self.request.query_params.get("category")
@@ -66,7 +72,7 @@ class JobDetailView(generics.RetrieveAPIView):
         return (
             Job.objects.select_related("client__account__user", "category")
             .prefetch_related("tags", "proposals", "milestone_plans", "milestone_plans__items")
-            .annotate(proposal_count_value=Count("proposals", distinct=True))
+            .annotate(proposal_count=Count("proposals", distinct=True))
         )
 
 
@@ -147,5 +153,125 @@ class MyJobsView(generics.ListAPIView):
             Job.objects.filter(client=client_profile)
             .select_related("client__account__user", "category")
             .prefetch_related("tags", "proposals", "milestone_plans", "milestone_plans__items")
-            .annotate(proposal_count_value=Count("proposals", distinct=True))
+            .annotate(proposal_count=Count("proposals", distinct=True))
         )
+
+class JobApplicantsView(generics.ListAPIView):
+    """
+    GET /api/jobs/<public_id>/applicants
+    All proposals on a job (client only, owner).
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProposalSerializer
+
+    def get_queryset(self):
+        account = getattr(self.request.user, "account", None)
+        client = getattr(account, "client_profile", None)
+        if not client:
+            return Proposal.objects.none()
+
+        return (
+            Proposal.objects.filter(
+                job__public_id=self.kwargs["public_id"],
+                job__client=client,
+            )
+            .select_related("freelancer__account__user", "job")
+            .prefetch_related("job__milestone_plans", "job__milestone_plans__items")
+        )
+
+class JobApplicantWorkspaceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, public_id, proposal_public_id):
+        proposal = get_object_or_404(
+            Proposal.objects.select_related(
+                "job",
+                "contract",
+                "freelancer__account__user",
+            ).prefetch_related(
+                "milestone_plans__items",
+            ),
+            public_id=proposal_public_id,
+            job__public_id=public_id,
+        )
+
+        if proposal.job.client.account.user_id != request.user.id:
+            raise PermissionDenied(
+                _("You do not have access to this applicant.")
+            )
+
+        selected_plan = (
+            proposal.milestone_plans.filter(is_selected=True).first()
+            or proposal.job.milestone_plans.filter(is_selected=True).first()
+        )
+
+        contract = getattr(proposal, "contract", None)
+
+        workspace = {
+            "job": proposal.job,
+            "proposal": proposal,
+            "selected_plan": selected_plan,
+            "contract": contract,
+        }
+
+        serializer = JobApplicantWorkspaceSerializer(workspace)
+
+        return Response(serializer.data)
+
+class JobApplicationSubmitView(APIView):
+    """
+    POST /api/jobs/<public_id>/submit
+    Freelancer submits a proposal on a job.
+
+    Proposal submission stays lean:
+    - cover letter
+    - proposed price
+    - delivery days
+
+    Milestone plans are NOT created here anymore.
+    They are handled later only if the freelancer is selected and the job does
+    not already have a client-approved milestone plan.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, public_id):
+        account = getattr(request.user, "account", None)
+        if not account or not getattr(account, "is_freelancer", False):
+            return Response(
+                {"detail": "Freelancer profile required."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        freelancer = getattr(account, "freelancer_profile", None)
+        if not freelancer:
+            return Response(
+                {"detail": "Freelancer profile not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        job = get_object_or_404(
+            Job.objects.select_related("client__account__user", "category").prefetch_related("milestone_plans", "milestone_plans__items"),
+            public_id=public_id,
+            status=Job.Status.OPEN,
+        )
+
+        # Prevent client from bidding on their own job.
+        if getattr(job.client, "account", None) == account:
+            return Response(
+                {"detail": "You cannot bid on your own job."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if Proposal.objects.filter(job=job, freelancer=freelancer).exists():
+            return Response(
+                {"detail": "You have already submitted a proposal for this job."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = ProposalCreateSerializer(data=request.data, context={"job": job})
+        serializer.is_valid(raise_exception=True)
+
+        proposal = serializer.save(job=job, freelancer=freelancer)
+        return Response(ProposalSerializer(proposal).data, status=status.HTTP_201_CREATED)

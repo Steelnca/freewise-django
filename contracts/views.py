@@ -88,12 +88,10 @@ class MilestonePlanCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     @transaction.atomic
-    def post(self, request):
+    def post(self, request, proposal_public_id):
         payload = _payload(request)
 
         job_public_id = str(payload.get("job_public_id") or "").strip()
-        proposal_public_id = str(payload.get("proposal_public_id") or "").strip()
-
         if not job_public_id:
             raise ValidationError({"job_public_id": _("Job public id is required.")})
 
@@ -116,7 +114,13 @@ class MilestonePlanCreateView(APIView):
         if proposal is None and role != "client":
             raise PermissionDenied(_("Only the client can create a job-level plan."))
 
-        if proposal is not None:
+        if proposal is not None and role == "client":
+            if proposal.status != Proposal.Status.SHORTLISTED:
+                raise ValidationError(
+                    {"proposal_public_id": _("Client-created proposal plans require a shortlisted proposal.")}
+                )
+
+        if proposal is not None and role == "freelancer":
             freelancer = _user_freelancer_profile(request.user)
             if not freelancer or proposal.freelancer_id != freelancer.id:
                 raise PermissionDenied(_("Only the proposal owner can create this plan."))
@@ -132,7 +136,7 @@ class MilestonePlanCreateView(APIView):
             source_role=MilestonePlan.SourceRole.CLIENT if role == "client" else MilestonePlan.SourceRole.FREELANCER,
         )
 
-        if plan.status in {MilestonePlan.Status.APPROVED, MilestonePlan.Status.LOCKED}:
+        if plan.status in {MilestonePlan.Status.APPROVED, MilestonePlan.Status.CONVERTED}:
             raise ValidationError({"detail": _("Approved plans cannot be edited.")})
 
         plan.note = str(payload.get("note") or "").strip()
@@ -144,7 +148,12 @@ class MilestonePlanCreateView(APIView):
         created_items = _replace_plan_items(plan, items_payload)
         _validate_plan_rules(plan)
 
-        if proposal is None and role == "client":
+        # Client-created plans are ready immediately.
+        if role == "client":
+            MilestonePlan.objects.filter(job=job, is_selected=True).exclude(pk=plan.pk).update(
+                is_selected=False,
+                selected_at=None,
+            )
             plan.status = MilestonePlan.Status.APPROVED
             plan.is_selected = True
             update_fields = ["status", "is_selected", "updated_at"]
@@ -155,19 +164,37 @@ class MilestonePlanCreateView(APIView):
 
             plan.save(update_fields=update_fields)
 
-            accepted_proposal = (
-                Proposal.objects.filter(job=job, status=Proposal.Status.ACCEPTED)
+            shortlisted = (
+                proposal if proposal is not None and proposal.status == Proposal.Status.SHORTLISTED
+                else Proposal.objects.filter(
+                    job=job,
+                    status=Proposal.Status.SHORTLISTED,
+                )
                 .order_by("-created_at")
                 .first()
             )
 
-            if accepted_proposal:
+            if shortlisted:
                 contract = create_contract_from_selected_plan(
                     job=job,
                     plan=plan,
-                    proposal=accepted_proposal,
+                    proposal=shortlisted,
                     created_by=request.user,
                 )
+                shortlisted.status = Proposal.Status.CONTRACTED
+                if hasattr(shortlisted, "contracted_at"):
+                    shortlisted.contracted_at = timezone.now()
+                    shortlisted.save(update_fields=["status", "contracted_at", "updated_at"])
+                else:
+                    shortlisted.save(update_fields=["status", "updated_at"])
+
+                Proposal.objects.filter(job=job).exclude(pk=shortlisted.pk).update(
+                    status=Proposal.Status.REJECTED
+                )
+
+                job.status = Job.Status.IN_PROGRESS
+                job.save(update_fields=["status"])
+
                 return Response(ContractSerializer(contract).data, status=status.HTTP_201_CREATED)
 
             return Response(
@@ -178,6 +205,7 @@ class MilestonePlanCreateView(APIView):
                 status=status.HTTP_201_CREATED,
             )
 
+        # Freelancer-created plans stay as draft/proposed until the client approves them.
         plan.status = MilestonePlan.Status.PROPOSED if (plan.note or items_payload) else MilestonePlan.Status.DRAFT
         plan.save(update_fields=["status", "updated_at"])
 
@@ -212,7 +240,10 @@ class MilestoneSubmissionCreateView(APIView):
             submission = submit_milestone(
                 milestone=milestone,
                 user=request.user,
-                submission_note=serializer.validated_data.get("note", ""),
+                submission_note=(
+                    serializer.validated_data.get("submission_note")
+                    or serializer.validated_data.get("note", "")
+                ),
                 submission_link=serializer.validated_data.get("submission_link", ""),
                 payload=payload,
             )
@@ -247,6 +278,7 @@ class RequestRevisionView(APIView):
                 milestone=milestone,
                 user=request.user,
                 revision_note=serializer.validated_data.get("revision_note", ""),
+                revision_scope=serializer.validated_data.get("revision_scope", ""),
             )
         except Exception as exc:
             return Response(
@@ -262,20 +294,19 @@ class MilestonePlanApproveView(APIView):
     @transaction.atomic
     def post(self, request, public_id: str):
         plan = get_object_or_404(
-            MilestonePlan.objects.select_related(
-                "job",
-                "proposal",
-                "created_by",
-                "job__client__account__user",
-            ).prefetch_related("items"),
+            MilestonePlan.objects.select_related("job", "proposal", "created_by")
+            .prefetch_related("items"),
             public_id=public_id,
         )
-
         _ensure_job_party_access(plan.job, request.user, proposal=plan.proposal)
+        client = _user_client_profile(request.user)
+        if not client or plan.job.client_id != client.id:
+            raise PermissionDenied(_("Only the client can approve milestone plans."))
 
-        # Client-created plans should already be approved at creation time.
-        # This endpoint still works as a safety net and for freelancer plans.
-        if plan.status not in {MilestonePlan.Status.APPROVED, MilestonePlan.Status.LOCKED}:
+        if plan.status == MilestonePlan.Status.CONVERTED:
+            raise ValidationError({"detail": _("Converted plans cannot be approved again.")})
+
+        if plan.status != MilestonePlan.Status.APPROVED:
             approve_milestone_plan(plan)
 
         MilestonePlan.objects.filter(job=plan.job).exclude(pk=plan.pk).update(is_selected=False)
@@ -283,41 +314,52 @@ class MilestonePlanApproveView(APIView):
         if not plan.is_selected:
             plan.is_selected = True
             update_fields = ["is_selected", "updated_at"]
-
             if hasattr(plan, "selected_at"):
-                from django.utils import timezone
                 plan.selected_at = timezone.now()
                 update_fields.insert(1, "selected_at")
-
             plan.save(update_fields=update_fields)
 
-        accepted_proposal = plan.proposal or (
+        shortlisted = plan.proposal or (
             Proposal.objects.filter(
                 job=plan.job,
-                status=Proposal.Status.ACCEPTED,
+                status=Proposal.Status.SHORTLISTED,
             )
             .order_by("-created_at")
             .first()
         )
 
-        if not accepted_proposal or accepted_proposal.status != Proposal.Status.ACCEPTED:
+        if not shortlisted or shortlisted.status != Proposal.Status.SHORTLISTED:
             return Response(
                 {
-                    "detail": _("Milestone plan approved and selected. Waiting for accepted proposal."),
+                    "detail": _("Milestone plan approved and selected. Waiting for shortlisted proposal."),
                     "plan": MilestonePlanSerializer(plan).data,
                 },
                 status=status.HTTP_200_OK,
             )
 
-        contract = getattr(accepted_proposal, "contract", None)
+        contract = getattr(shortlisted, "contract", None)
 
         if contract is None:
             contract = create_contract_from_selected_plan(
                 job=plan.job,
                 plan=plan,
-                proposal=accepted_proposal,
+                proposal=shortlisted,
                 created_by=request.user,
             )
+            shortlisted.status = Proposal.Status.CONTRACTED
+            if hasattr(shortlisted, "contracted_at"):
+                shortlisted.contracted_at = timezone.now()
+                shortlisted.save(update_fields=["status", "contracted_at", "updated_at"])
+            else:
+                shortlisted.save(update_fields=["status", "updated_at"])
+
+            Proposal.objects.filter(job=plan.job).exclude(pk=shortlisted.pk).update(
+                status=Proposal.Status.REJECTED
+            )
+
+            plan.job.status = Job.Status.IN_PROGRESS
+            plan.job.save(update_fields=["status"])
+
             return Response(ContractSerializer(contract).data, status=status.HTTP_201_CREATED)
 
         total = _validate_plan_rules(plan)
@@ -412,12 +454,22 @@ class MilestonePlanDetailView(APIView):
         _ensure_job_party_access(plan.job, request.user, proposal=plan.proposal)
         return Response(MilestonePlanSerializer(plan).data, status=status.HTTP_200_OK)
 
+    def patch(self, request, public_id: str):
+        plan = self.get_object(public_id)
+        _ensure_job_party_access(plan.job, request.user, proposal=plan.proposal)
+        return super().patch(self, request, public_id)
+
+    def delete(self, request, public_id: str):
+        plan = self.get_object(public_id)
+        _ensure_job_party_access(plan.job, request.user, proposal=plan.proposal)
+        return super().delete(self, request, public_id)
+
     @transaction.atomic
     def patch(self, request, public_id: str):
         plan = self.get_object(public_id)
         _ensure_job_party_access(plan.job, request.user, proposal=plan.proposal)
 
-        if plan.status in {MilestonePlan.Status.APPROVED, MilestonePlan.Status.LOCKED}:
+        if plan.status in {MilestonePlan.Status.APPROVED, MilestonePlan.Status.CONVERTED}:
             raise ValidationError({"detail": _("Approved plans cannot be edited.")})
 
         payload = _payload(request)
@@ -442,7 +494,7 @@ class MilestonePlanDetailView(APIView):
         plan = self.get_object(public_id)
         _ensure_job_party_access(plan.job, request.user, proposal=plan.proposal)
 
-        if plan.status in {MilestonePlan.Status.APPROVED, MilestonePlan.Status.LOCKED}:
+        if plan.status in {MilestonePlan.Status.APPROVED, MilestonePlan.Status.CONVERTED}:
             raise ValidationError({"detail": _("Approved plans cannot be deleted.")})
 
         plan.delete()

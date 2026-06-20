@@ -16,6 +16,7 @@ from django.db.models import Q
 
 from payments.constants import DEFAULT_CURRENCY
 from core.models.mixins import PublicIDMixin
+from jobs.models import Job
 
 class Contract(PublicIDMixin, models.Model):
     """
@@ -40,10 +41,6 @@ class Contract(PublicIDMixin, models.Model):
         WITHDRAWN = "WITHDRAWN", _("Withdrawn")
         CANCELLED = "CANCELLED", _("Cancelled")
 
-    class MilestoneMode(models.TextChoices):
-        SINGLE = "SINGLE", _("Single")
-        MULTI = "MULTI", _("Multi")
-
     # --- Source of the contract ---
     source_type = models.CharField(
         max_length=20,
@@ -60,13 +57,6 @@ class Contract(PublicIDMixin, models.Model):
         null=True,
         blank=True,
         related_name="contract",
-    )
-
-    milestone_mode = models.CharField(
-        max_length=10,
-        choices=MilestoneMode.choices,
-        default=MilestoneMode.SINGLE,
-        db_index=True,
     )
 
     collab_allowed = models.BooleanField(default=False)
@@ -311,6 +301,10 @@ class MilestonePlan(PublicIDMixin, models.Model):
         CLIENT = "CLIENT", _("Client")
         FREELANCER = "FREELANCER", _("Freelancer")
 
+    class MilestoneMode(models.TextChoices):
+        SINGLE = "SINGLE", _("Single")
+        MULTI = "MULTI", _("Multi")
+
     PUBLIC_ID_PREFIX = "fwmp"
     PUBLIC_ID_LENGTH_PREFIX = 12
 
@@ -345,6 +339,13 @@ class MilestonePlan(PublicIDMixin, models.Model):
         max_length=12,
         choices=Status.choices,
         default=Status.DRAFT,
+        db_index=True,
+    )
+
+    mode = models.CharField(
+        max_length=10,
+        choices=MilestoneMode.choices,
+        default=MilestoneMode.MULTI,
         db_index=True,
     )
 
@@ -385,6 +386,12 @@ class MilestonePlan(PublicIDMixin, models.Model):
 
     def __str__(self):
         return f"Plan {self.public_id}"
+
+    def clean(self):
+        super().clean()
+
+        if self.job.pricing_mode == Job.PricingMode.FIXED and not self.job.budget_total == self.total_amount:
+            raise ValidationError({"total_amount": _("Milestone plan total does not match the job budget.")})
 
 class MilestonePlanItem(PublicIDMixin, models.Model):
     class Status(models.TextChoices):

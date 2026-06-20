@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 from decimal import Decimal
-from typing import Optional
 
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
@@ -196,6 +195,14 @@ def _job_currency(job) -> str:
     return "DZD"
 
 
+def _plan_mode(plan: MilestonePlan) -> str:
+    for attr in ("mode", "milestone_mode"):
+        value = getattr(plan, attr, None)
+        if value:
+            return str(value).upper()
+    raise ValidationError({"detail": _("Milestone plan mode is missing.")})
+
+
 def _ensure_contract_party_access(contract: Contract, user) -> None:
     client = _user_client_profile(user)
     freelancer = _user_freelancer_profile(user)
@@ -237,8 +244,8 @@ def _ensure_proposal_party_access(proposal: Proposal, user) -> None:
 
 def _item_source_for_user(user) -> str:
     if _user_client_profile(user):
-        return MilestonePlanItem.Source.CLIENT
-    return MilestonePlanItem.Source.FREELANCER
+        return MilestonePlanItem.SourceRole.CLIENT
+    return MilestonePlanItem.SourceRole.FREELANCER
 
 
 def _sum_items(items: List[MilestonePlanItem]) -> Decimal:
@@ -295,7 +302,6 @@ def _replace_plan_items(plan: MilestonePlan, items_payload: List[Dict[str, Any]]
             amount=item_data["amount"],
             due_date=item_data["due_date"],
             order=item_data["order"],
-            source=item_data["source"],
             status=MilestonePlanItem.Status.DRAFT,
             metadata=item_data["metadata"],
         )
@@ -309,15 +315,30 @@ def _validate_plan_rules(plan: MilestonePlan) -> Decimal:
     total = _sum_items(items)
 
     if not items:
-        raise ValidationError({"detail": _("Milestone plan must contain at least one item.")})
+        raise ValidationError({"detail": _("Milestone plan must have at least one item.")})
 
-    job = plan.job
-    milestone_mode = getattr(job, "milestone_mode", "SINGLE")
-    pricing_mode = getattr(job, "pricing_mode", "NEGOTIABLE")
-    budget_total = getattr(job, "budget_total", None)
+    if len(items) > MAX_MILESTONES:
+        raise ValidationError({"detail": _(f"Maximum {MAX_MILESTONES} milestones are allowed.")})
 
-    if milestone_mode == "SINGLE" and len(items) != 1:
+    mode = _plan_mode(plan)
+    pricing_mode = getattr(plan.job, "pricing_mode", None)
+    budget_total = getattr(plan.job, "budget_total", None)
+
+
+    if not items:
+        raise ValidationError({"detail": _("Milestone plan must have at least one item.")})
+
+    if mode == "SINGLE" and len(items) != 1:
         raise ValidationError({"detail": _("Single milestone mode allows exactly one item.")})
+
+    if budget_total is None:
+        raise ValidationError({"detail": _("Fixed-price plans require a budget total.")})
+
+    if pricing_mode is None:
+        raise ValidationError({"detail": _("Contract require job pricing mode.")})
+
+    if pricing_mode == Job.PricingMode.FIXED and not total == budget_total:
+        raise ValidationError({"detail": _("Milestones must equal the fixed budget total.")})
 
     if len(items) > 1:
         basis = budget_total or total
@@ -325,18 +346,13 @@ def _validate_plan_rules(plan: MilestonePlan) -> Decimal:
         last_floor = basis * MIN_LAST_MILESTONE_PERCENT / Decimal("100")
 
         if items[0].amount > first_cap:
-            raise ValidationError({"detail": _("The first milestone is too large.")})
+            raise ValidationError({"detail": _("The first milestone amount is too large.")})
         if items[-1].amount < last_floor:
-            raise ValidationError({"detail": _("The last milestone is too small.")})
-
-    if pricing_mode == "FIXED" and budget_total is not None:
-        if total != budget_total:
-            raise ValidationError({"detail": _("Milestones must equal the fixed budget total.")})
+            raise ValidationError({"detail": _("The last milestone amount is too small.")})
 
     plan.total_amount = total
     plan.save(update_fields=["total_amount", "updated_at"])
     return total
-
 
 def _get_or_create_active_plan(*, job: Job, proposal: Proposal | None, created_by, source_role: str) -> MilestonePlan:
     active_plan = (
@@ -362,47 +378,6 @@ def _get_or_create_active_plan(*, job: Job, proposal: Proposal | None, created_b
         currency=_job_currency(job),
     )
 
-def _create_contract_from_approved_plan(proposal: Proposal, plan: MilestonePlan, created_by) -> Contract:
-    total = _validate_plan_rules(plan)
-    job = proposal.job
-    client = _job_client_profile(job)
-
-    if client is None:
-        raise ValidationError({"detail": _("Job client profile could not be resolved.")})
-
-    contract = Contract.objects.create(
-        proposal=proposal,
-        client=client,
-        freelancer=proposal.freelancer,
-        title=getattr(job, "title", "") or getattr(proposal, "title", "") or _("Contract"),
-        notes=getattr(proposal, "cover_letter", "") or "",
-        status=Contract.Status.ACTIVE,
-        milestone_mode=getattr(job, "milestone_mode", Contract.MilestoneMode.SINGLE),
-        split_owner=getattr(job, "split_owner", Contract.SplitOwner.CLIENT),
-        collab_allowed=getattr(job, "collab_allowed", False),
-        budget_total=getattr(job, "budget_total", None) or total,
-        agreed_price=total,
-        active_at=timezone.now(),
-    )
-
-    for item in plan.items.order_by("order", "created_at"):
-        Milestone.objects.create(
-            contract=contract,
-            source_item=item,
-            title=item.title,
-            description=item.description,
-            amount=item.amount,
-            due_date=item.due_date,
-            order=item.order,
-            status=Milestone.Status.PENDING,
-        )
-        item.status = MilestonePlanItem.Status.CONVERTED
-        item.save(update_fields=["status", "updated_at"])
-
-    return contract
-
-
-@transaction.atomic
 def fund_milestone_from_payment(
     *,
     milestone: Milestone,
@@ -1164,41 +1139,12 @@ def resolve_dispute_to_client(*, milestone: Milestone, user, note: str = "") -> 
 
     return milestone
 
-def _sum_plan_items(items):
-    return sum((item.amount for item in items), Decimal("0.00"))
 
 
 @transaction.atomic
 def validate_milestone_plan(plan: MilestonePlan):
-    items = list(plan.items.order_by("order", "created_at"))
-    if not items:
-        raise ValidationError({"detail": "Milestone plan must have at least one item."})
+    return _validate_plan_rules(plan)
 
-    if len(items) > MAX_MILESTONES:
-        raise ValidationError({"detail": f"Maximum {MAX_MILESTONES} milestones allowed."})
-
-    total = _sum_plan_items(items)
-    job = plan.job
-
-    if job.milestone_mode == "SINGLE" and len(items) != 1:
-        raise ValidationError({"detail": "Single mode allows exactly one milestone."})
-
-    if len(items) > 1:
-        basis = job.budget_total or total
-        first_cap = basis * MAX_FIRST_MILESTONE_PERCENT / Decimal("100")
-        last_floor = basis * MIN_LAST_MILESTONE_PERCENT / Decimal("100")
-        if items[0].amount > first_cap:
-            raise ValidationError({"detail": "First milestone is too large."})
-        if items[-1].amount < last_floor:
-            raise ValidationError({"detail": "Last milestone is too small."})
-
-    if job.pricing_mode == "FIXED" and job.budget_total is not None:
-        if total != job.budget_total:
-            raise ValidationError({"detail": "Milestones must equal the fixed budget total."})
-
-    plan.total_amount = total
-    plan.save(update_fields=["total_amount", "updated_at"])
-    return total
 
 @transaction.atomic
 def approve_milestone_plan(plan: MilestonePlan):
@@ -1207,8 +1153,9 @@ def approve_milestone_plan(plan: MilestonePlan):
     plan.save(update_fields=["status", "updated_at"])
     return plan
 
+
 @transaction.atomic
-def create_contract_from_selected_plan(*, job, plan, proposal, created_by=None):
+def create_contract_from_selected_plan(*, job, plan: MilestonePlan, proposal, created_by=None) -> Contract:
     if plan.job_id != job.id:
         raise ValidationError({"detail": _("Milestone plan does not belong to this job.")})
 
@@ -1218,17 +1165,14 @@ def create_contract_from_selected_plan(*, job, plan, proposal, created_by=None):
     if not plan.is_selected:
         raise ValidationError({"detail": _("Select a milestone plan before creating the contract.")})
 
-    items = list(plan.items.order_by("order", "created_at"))
-    if not items:
-        raise ValidationError({"detail": _("Milestone plan must contain at least one item.")})
-
     total = _validate_plan_rules(plan)
     client = _job_client_profile(job)
+
     if client is None:
         raise ValidationError({"detail": _("Job client profile could not be resolved.")})
 
     if proposal is None:
-        raise ValidationError({"detail": _("An accepted proposal is required.")})
+        raise ValidationError({"detail": _("An shortlisted proposal is required.")})
 
     contract = Contract.objects.create(
         job=job,
@@ -1238,17 +1182,17 @@ def create_contract_from_selected_plan(*, job, plan, proposal, created_by=None):
         title=getattr(job, "title", "") or _("Contract"),
         notes="",
         status=Contract.Status.PENDING_FUNDING,
-        milestone_mode=getattr(job, "milestone_mode", Contract.MilestoneMode.SINGLE),
+        milestone_mode=_plan_mode(plan),
         split_owner=getattr(job, "split_owner", Contract.SplitOwner.CLIENT),
         collab_allowed=getattr(job, "collab_allowed", False),
         budget_total=getattr(job, "budget_total", None) or total,
         agreed_price=total,
         source_plan=plan if hasattr(Contract, "source_plan") else None,
-        deadline=job.deadline,
+        deadline=getattr(job, "deadline", None) or getattr(proposal.job, "deadline", None),
     )
 
-    for item in items:
-        Milestone.objects.create(
+    for item in plan.items.order_by("order", "created_at"):
+        milestone = Milestone.objects.create(
             contract=contract,
             source_item=item,
             title=item.title,
@@ -1271,58 +1215,5 @@ def create_contract_from_selected_plan(*, job, plan, proposal, created_by=None):
             "proposal_public_id": getattr(proposal, "public_id", None),
         },
     )
-
-    return contract
-
-@transaction.atomic
-def create_contract_from_selected_plan(*, job, plan: MilestonePlan, proposal, created_by=None) -> Contract:
-    if plan.job_id != job.id:
-        raise ValidationError({"detail": _("Milestone plan does not belong to this job.")})
-
-    if plan.status != MilestonePlan.Status.APPROVED:
-        raise ValidationError({"detail": _("Only approved plans can create a contract.")})
-
-    if not plan.is_selected:
-        raise ValidationError({"detail": _("Select a milestone plan before creating the contract.")})
-
-    total = _validate_plan_rules(plan)
-
-    client = _job_client_profile(job)
-    if client is None:
-        raise ValidationError({"detail": _("Job client profile could not be resolved.")})
-
-    if proposal is None:
-        raise ValidationError({"detail": _("An accepted proposal is required.")})
-
-    contract = Contract.objects.create(
-        job=job,
-        proposal=proposal,
-        client=client,
-        freelancer=proposal.freelancer,
-        title=getattr(job, "title", "") or _("Contract"),
-        notes="",
-        status=Contract.Status.PENDING_FUNDING,
-        milestone_mode=getattr(job, "milestone_mode", Contract.MilestoneMode.SINGLE),
-        split_owner=getattr(job, "split_owner", Contract.SplitOwner.CLIENT),
-        collab_allowed=getattr(job, "collab_allowed", False),
-        budget_total=getattr(job, "budget_total", None) or total,
-        agreed_price=total,
-        source_plan=plan if hasattr(Contract, "source_plan") else None,
-        deadline=proposal.job.deadline,
-    )
-
-    for item in plan.items.order_by("order", "created_at"):
-        milestone = Milestone.objects.create(
-            contract=contract,
-            source_item=item,
-            title=item.title,
-            description=item.description,
-            amount=item.amount,
-            due_date=item.due_date,
-            order=item.order,
-            status=Milestone.Status.PENDING,
-        )
-        item.status = MilestonePlanItem.Status.CONVERTED
-        item.save(update_fields=["status", "updated_at"])
 
     return contract

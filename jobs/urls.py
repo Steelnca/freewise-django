@@ -2,7 +2,7 @@
 from django.urls import path
 from .views import (
     JobListView, JobCreateView, JobDetailView,
-    JobUpdateView, MyJobsView, JobCategoriesView, JobDeleteView
+    JobUpdateView, MyJobsView, JobCategoriesView, JobDeleteView, JobApplicantsView, JobApplicantWorkspaceView, JobApplicationSubmitView
 )
 
 urlpatterns = [
@@ -13,4 +13,13 @@ urlpatterns = [
     path('<str:public_id>/',      JobDetailView.as_view(),  name='job-detail'),
     path('<str:public_id>/edit/', JobUpdateView.as_view(),  name='job-update'),
     path('<str:public_id>/delete/', JobDeleteView.as_view(),  name='job-delete'),
+
+    path("<str:public_id>/submit/", JobApplicationSubmitView.as_view(), name="proposal-submit"),
+
+    path("<str:public_id>/applicants/", JobApplicantsView.as_view(), name="job-applicants"),
+    path("<str:public_id>/applicants/<str:proposal_public_id>/",
+        JobApplicantWorkspaceView.as_view(),
+        name="applicant-detail",
+    ),
+
 ]

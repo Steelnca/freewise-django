@@ -19,7 +19,7 @@ class TagAdmin(admin.ModelAdmin):
 
 @admin.register(Job)
 class JobAdmin(admin.ModelAdmin):
-    list_display    = ('title', 'client', 'category', 'status', 'budget_total', 'deadline', 'created_at')
+    list_display    = ('title', 'client', 'category', 'status', 'budget_total', 'pricing_mode', 'deadline', 'created_at')
     list_filter     = ('status', 'experience_level', 'category')
     search_fields   = ('title', 'description', 'client__account__user__username')
     readonly_fields = ('public_id', 'created_at', 'updated_at')
@@ -35,7 +35,7 @@ class JobAdmin(admin.ModelAdmin):
             'fields': ('title', 'description', 'category', 'tags', 'experience_level'),
         }),
         ('Budget & Deadline', {
-            'fields': ('budget_total', 'deadline'),
+            'fields': ('budget_total', 'pricing_mode', 'deadline'),
         }),
         ('Status', {
             'fields': ('status',),

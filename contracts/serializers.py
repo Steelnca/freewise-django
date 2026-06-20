@@ -45,6 +45,7 @@ class MilestonePlanSerializer(serializers.ModelSerializer):
             "currency",
             "suggestion_enabled",
             "items",
+            "is_selected",
             "created_at",
             "updated_at",
         ]
@@ -57,7 +58,7 @@ class MilestoneSerializer(serializers.ModelSerializer):
     latest_payment_attempt_provider_status = serializers.SerializerMethodField()
     latest_payment_attempt_checkout_url = serializers.SerializerMethodField()
     latest_payment_attempt_retryable = serializers.SerializerMethodField()
-    source_item_public_id = serializers.CharField(source="source_item.public_id", read_only=True)
+    source_item_public_id = serializers.CharField(source="proposal.public_id", read_only=True, allow_null=True)
     can_submit = serializers.SerializerMethodField()
     can_fund = serializers.SerializerMethodField()
     can_approve = serializers.SerializerMethodField()
@@ -171,8 +172,8 @@ class ContractSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display", read_only=True)
     source_label = serializers.SerializerMethodField()
     milestones = MilestoneSerializer(many=True, read_only=True)
-    milestone_mode = serializers.CharField(source="get_milestone_mode_display", read_only=True)
-    milestone_mode_value = serializers.CharField(source="milestone_mode", read_only=True)
+    milestone_mode = serializers.SerializerMethodField()
+    milestone_mode_value = serializers.SerializerMethodField()
     collab_allowed = serializers.BooleanField(read_only=True)
 
     viewer_role = serializers.SerializerMethodField()
@@ -244,6 +245,16 @@ class ContractSerializer(serializers.ModelSerializer):
 
     def get_source_label(self, obj):
         return obj.display_name
+
+    def get_milestone_mode(self, obj):
+        if not obj.source_plan_id:
+            return None
+        return obj.source_plan.get_mode_display()
+
+    def get_milestone_mode_value(self, obj):
+        if not obj.source_plan_id:
+            return None
+        return obj.source_plan.mode
 
     def _viewer_role(self, obj):
         request = self.context.get("request")
@@ -408,6 +419,8 @@ class ContractSerializer(serializers.ModelSerializer):
         ).data
 
 class MilestoneActionSerializer(serializers.Serializer):
+    note = serializers.CharField(required=False, allow_blank=True, default="")
+    submission_note = serializers.CharField(required=False, allow_blank=True, default="")
     review_note = serializers.CharField(required=False, allow_blank=True, default="")
     revision_note = serializers.CharField(required=False, allow_blank=True, default="")
     revision_scope = serializers.CharField(required=False, allow_blank=True, default="")

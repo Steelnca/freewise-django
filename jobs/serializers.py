@@ -1,12 +1,15 @@
 from decimal import Decimal
 
-from django.db import transaction
 from rest_framework import serializers
+from django.db import transaction
+from django.utils.translation import gettext as _
 
 from .models import Category, Job, Tag
 
 # If your milestone plan models live in another app, adjust this import.
 from contracts.models import MilestonePlan, MilestonePlanItem
+from contracts.serializers import ContractSerializer
+from proposals.serializers import ProposalSerializer
 
 MAX_MILESTONES = 10
 FIRST_MILESTONE_MAX_PERCENT = Decimal("35")
@@ -87,7 +90,7 @@ class JobSerializer(serializers.ModelSerializer):
     client_slug = serializers.CharField(source="client.account.slug", read_only=True)
     category = CategorySerializer(read_only=True)
     tags = TagSerializer(many=True, read_only=True)
-    proposal_count = serializers.IntegerField(source="proposals.count", read_only=True)
+    proposal_count = serializers.SerializerMethodField()
     milestone_plans = MilestonePlanSerializer(many=True, read_only=True)
     allow_milestone_suggestions = serializers.BooleanField(read_only=True)
 
@@ -103,7 +106,6 @@ class JobSerializer(serializers.ModelSerializer):
             "tags",
             "experience_level",
             "pricing_mode",
-            "milestone_mode",
             "split_owner",
             "collab_allowed",
             "budget_total",
@@ -117,6 +119,14 @@ class JobSerializer(serializers.ModelSerializer):
         )
         read_only_fields = ("public_id", "status", "proposal_count", "created_at", "updated_at")
 
+    def get_proposal_count(self, obj):
+        annotated_count = getattr(obj, "proposal_count", None)
+        if annotated_count is not None:
+            return annotated_count
+        if not obj.pk:
+            return 0
+        return obj.proposals.count()
+
 
 class JobWriteSerializer(serializers.ModelSerializer):
     category_id = serializers.PrimaryKeyRelatedField(
@@ -125,6 +135,19 @@ class JobWriteSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True,
     )
+
+    pricing_mode = serializers.ChoiceField(
+        choices=Job.PricingMode.choices
+    )
+
+    budget_total = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+    )
+    allow_milestone_suggestions = serializers.BooleanField(required=False)
+
     tag_ids = serializers.PrimaryKeyRelatedField(
         queryset=Tag.objects.all(),
         source="tags",
@@ -141,12 +164,27 @@ class JobWriteSerializer(serializers.ModelSerializer):
             "category_id",
             "tag_ids",
             "experience_level",
+            "pricing_mode",
             "budget_total",
             "deadline",
+            "allow_milestone_suggestions",
             "milestone_plan",
         )
 
     def validate(self, attrs):
+        pricing_mode = attrs.get("pricing_mode", getattr(self.instance, "pricing_mode", None))
+        budget_total = attrs.get("budget_total", getattr(self.instance, "budget_total", None))
+
+        if budget_total is None or Decimal(str(budget_total)) <= 0:
+            raise serializers.ValidationError({
+                "budget_total": _("Budget total is required and must be greater than zero.")
+            })
+
+        if pricing_mode not in Job.PricingMode.values:
+            raise serializers.ValidationError({
+                "pricing_mode": _("Choose fixed or negotiable pricing.")
+            })
+
         plan = attrs.get("milestone_plan")
         allow_suggestions = attrs.get(
             "allow_milestone_suggestions",
@@ -155,51 +193,60 @@ class JobWriteSerializer(serializers.ModelSerializer):
 
         if not plan and not allow_suggestions:
             raise serializers.ValidationError({
-                "allow_milestone_suggestions": "Enable suggestions when no milestone plan is provided."
+                "allow_milestone_suggestions": _("Enable suggestions when no milestone plan is provided.")
             })
 
         if plan:
+            if self.instance is not None and hasattr(self.instance, "contract"):
+                raise serializers.ValidationError(
+                    {"milestone_plan": _("Milestone plans cannot be changed after a contract has been created.")}
+                )
+
             items = plan.get("items") or []
             if not items:
                 raise serializers.ValidationError(
-                    {"milestone_plan": "Milestone plan must contain at least one item."}
+                    {"milestone_plan": _("Milestone plan must contain at least one item.")}
                 )
 
             if len(items) > MAX_MILESTONES:
                 raise serializers.ValidationError(
-                    {"milestone_plan": f"Maximum {MAX_MILESTONES} milestones are allowed."}
+                    {"milestone_plan": _(f"Maximum {MAX_MILESTONES} milestones are allowed.")}
                 )
 
-            total = Decimal("0.00")
+            total_items_amount = Decimal("0.00")
             for item in items:
-                total += Decimal(str(item["amount"]))
+                total_items_amount += Decimal(str(item["amount"]))
+
+            if Decimal(str(budget_total)) != total_items_amount:
+                raise serializers.ValidationError(
+                    {"budget_total": _("The budget amount does not match the total milestone amount.")}
+                )
 
             if len(items) > 1:
-                first_cap = total * FIRST_MILESTONE_MAX_PERCENT / Decimal("100")
-                last_floor = total * LAST_MILESTONE_MIN_PERCENT / Decimal("100")
+                first_cap = total_items_amount * FIRST_MILESTONE_MAX_PERCENT / Decimal("100")
+                last_floor = total_items_amount * LAST_MILESTONE_MIN_PERCENT / Decimal("100")
 
                 if Decimal(str(items[0]["amount"])) > first_cap:
                     raise serializers.ValidationError(
-                        {"milestone_plan": "The first milestone is too large."}
+                        {"milestone_plan": _("The first milestone is too large.")}
                     )
 
                 if Decimal(str(items[-1]["amount"])) < last_floor:
                     raise serializers.ValidationError(
-                        {"milestone_plan": "The last milestone is too small."}
+                        {"milestone_plan": _("The last milestone is too small.")}
                     )
 
             # Client plan becomes the source of truth for the deal amount.
-            attrs["budget_total"] = total
-            attrs["milestone_mode"] = (
-                Job.MilestoneMode.SINGLE if len(items) == 1 else Job.MilestoneMode.MULTI
-            )
+            attrs["budget_total"] = total_items_amount
             attrs["split_owner"] = Job.SplitOwner.CLIENT
+
         else:
-            if attrs["budget_total"] in (None, ""):
+            if budget_total in (None, ""):
                 raise serializers.ValidationError(
-                    {"budget_total": "Enter a total deal price when no milestone plan is provided."}
+                    {"budget_total": _("Enter a total deal price when no milestone plan is provided.")}
                 )
 
+            attrs["budget_total"] = budget_total
             # No plan from client means the split will come later from freelancer proposal.
             attrs["split_owner"] = Job.SplitOwner.FREELANCER
 
@@ -219,7 +266,7 @@ class JobWriteSerializer(serializers.ModelSerializer):
             job=job,
             created_by=self.context["request"].user,
             source_role=MilestonePlan.SourceRole.CLIENT,
-            status=MilestonePlan.Status.PROPOSED,
+            status=MilestonePlan.Status.APPROVED,
             note=plan_data.get("note", ""),
             suggestion_enabled=bool(plan_data.get("suggestion_enabled", True)),
             currency="DZD",
@@ -235,7 +282,7 @@ class JobWriteSerializer(serializers.ModelSerializer):
                 amount=item_data["amount"],
                 due_date=item_data["due_date"],
                 order=item_data["order"],
-                status=MilestonePlanItem.Status.DRAFT,
+                status=MilestonePlanItem.Status.APPROVED,
                 metadata=item_data.get("metadata", {}),
             )
 
@@ -264,3 +311,9 @@ class JobWriteSerializer(serializers.ModelSerializer):
             self._save_plan(job, plan_data)
 
         return job
+
+class JobApplicantWorkspaceSerializer(serializers.Serializer):
+    job = JobSerializer()
+    proposal = ProposalSerializer()
+    selected_plan = MilestonePlanSerializer(allow_null=True, required=False)
+    contract = ContractSerializer(allow_null=True, required=False)

@@ -31,7 +31,7 @@ def on_proposal_saved(sender, instance, created, **kwargs):
         )
     else:
         # Notify freelancer: proposal accepted or rejected
-        if instance.status == 'ACCEPTED':
+        if instance.status == 'CONTRACTED':
             notify(
                 account=instance.freelancer.account,
                 type_=Notification.Type.PROPOSAL_ACCEPTED,

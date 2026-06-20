@@ -46,10 +46,6 @@ class Job(PublicIDMixin, models.Model):
         FIXED = "FIXED", _("Fixed")
         NEGOTIABLE = "NEGOTIABLE", _("Negotiable")
 
-    class MilestoneMode(models.TextChoices):
-        SINGLE = "SINGLE", _("Single")
-        MULTI = "MULTI", _("Multi")
-
     class SplitOwner(models.TextChoices):
         CLIENT = "CLIENT", _("Client")
         FREELANCER = "FREELANCER", _("Freelancer")
@@ -98,13 +94,6 @@ class Job(PublicIDMixin, models.Model):
         db_index=True,
     )
 
-    milestone_mode = models.CharField(
-        max_length=10,
-        choices=MilestoneMode.choices,
-        default=MilestoneMode.SINGLE,
-        db_index=True,
-    )
-
     split_owner = models.CharField(
         max_length=20,
         choices=SplitOwner.choices,
@@ -129,11 +118,31 @@ class Job(PublicIDMixin, models.Model):
     class Meta:
         ordering = ['-created_at']
 
+        constraints = [
+            models.UniqueConstraint(
+                fields=["job", "freelancer"],
+                name="unique_proposal_per_freelancer_per_job",
+            )
+        ]
+
     def __str__(self):
         return self.title
 
     def clean(self):
         super().clean()
 
-        if self.budget_total is not None and self.budget_total <= Decimal("0.00"):
-            raise ValidationError({"budget_total": _("Job budget total must be greater than zero.")})
+        if self.budget_total is None:
+            raise ValidationError({"budget_total": _("Budget total is required field.")})
+
+        if self.budget_total <= Decimal("0.00"):
+            raise ValidationError({"budget_total": _("Budget total must be greater than zero.")})
+
+        if self.pricing_mode not in {self.PricingMode.FIXED, self.PricingMode.NEGOTIABLE}:
+            raise ValidationError({"pricing_mode": _("Choose fixed or negotiable pricing.")})
+
+        if self.pk and self.pricing_mode == self.PricingMode.FIXED:
+            selected_plan = self.milestone_plans.filter(is_selected=True).first()
+            if selected_plan and self.budget_total != selected_plan.total_amount:
+                raise ValidationError(
+                    {"budget_total": _("Budget total must match the selected milestone plan total.")}
+                )

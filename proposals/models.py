@@ -6,10 +6,10 @@ from core.models.mixins import PublicIDMixin
 class Proposal(PublicIDMixin, models.Model):
 
     class Status(models.TextChoices):
-        PENDING   = 'PENDING',   _('Pending')
-        AWAITING_PLAN = 'AWAITING_PLAN', _('Awaiting Plan')
-        ACCEPTED  = 'ACCEPTED',  _('Accepted')
-        REJECTED  = 'REJECTED',  _('Rejected')
+        PENDING = 'PENDING', _('Pending')
+        SHORTLISTED = 'SHORTLISTED', _('Shortlisted')
+        CONTRACTED = 'CONTRACTED', _('Contracted')
+        REJECTED = 'REJECTED', _('Rejected')
         WITHDRAWN = 'WITHDRAWN', _('Withdrawn')
 
     PUBLIC_ID_PREFIX = "fwpp"
@@ -40,6 +40,10 @@ class Proposal(PublicIDMixin, models.Model):
     )
 
     # --- Timestamps ---
+
+    shortlisted_at = models.DateTimeField(null=True, blank=True)
+    contracted_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
