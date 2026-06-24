@@ -32,10 +32,13 @@ class Tag(models.Model):
 class Job(PublicIDMixin, models.Model):
 
     class Status(models.TextChoices):
-        OPEN        = 'OPEN',        _('Open')
-        IN_PROGRESS = 'IN_PROGRESS', _('In Progress')
-        COMPLETED   = 'COMPLETED',   _('Completed')
-        CANCELLED   = 'CANCELLED',   _('Cancelled')
+        DRAFT = "DRAFT", _("Draft")
+        OPEN = "OPEN", _("Open")
+        IN_PROGRESS = "IN_PROGRESS", _("In Progress")
+        SHORTLISTED = "SHORTLISTED", _("Shortlisted")
+        PAUSED = "PAUSED", _("Paused")
+        CLOSED = "CLOSED", _("Closed")
+        ARCHIVED = "ARCHIVED", _("Archived")
 
     class ExperienceLevel(models.TextChoices):
         ENTRY    = 'BEGINNER',    _('Beginner')
@@ -83,7 +86,7 @@ class Job(PublicIDMixin, models.Model):
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
-        default=Status.OPEN,
+        default=Status.DRAFT,
         db_index=True,
     )
 
@@ -118,13 +121,6 @@ class Job(PublicIDMixin, models.Model):
     class Meta:
         ordering = ['-created_at']
 
-        constraints = [
-            models.UniqueConstraint(
-                fields=["job", "freelancer"],
-                name="unique_proposal_per_freelancer_per_job",
-            )
-        ]
-
     def __str__(self):
         return self.title
 
@@ -137,7 +133,7 @@ class Job(PublicIDMixin, models.Model):
         if self.budget_total <= Decimal("0.00"):
             raise ValidationError({"budget_total": _("Budget total must be greater than zero.")})
 
-        if self.pricing_mode not in {self.PricingMode.FIXED, self.PricingMode.NEGOTIABLE}:
+        if self.pricing_mode not in {self.PricingMode.values}:
             raise ValidationError({"pricing_mode": _("Choose fixed or negotiable pricing.")})
 
         if self.pk and self.pricing_mode == self.PricingMode.FIXED:

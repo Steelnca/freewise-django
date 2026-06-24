@@ -9,7 +9,8 @@ class PublicIDMixin(models.Model):
         max_length=64,
         unique=True,
         db_index=True,
-        verbose_name=_("public id"),
+        editable=False,
+        verbose_name=_("Public ID"),
         help_text=_("Public ID used in URLs and sharing."),
     )
 

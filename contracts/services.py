@@ -22,7 +22,7 @@ from django.utils.translation import gettext_lazy as _
 
 from proposals.models import Proposal
 from jobs.models import Job
-
+from billing.services import assert_can_create_proposal
 from payments.models import EscrowHold
 from payments.services import (
     DEFAULT_CURRENCY as PAYMENTS_DEFAULT_CURRENCY,
@@ -1173,6 +1173,8 @@ def create_contract_from_selected_plan(*, job, plan: MilestonePlan, proposal, cr
 
     if proposal is None:
         raise ValidationError({"detail": _("An shortlisted proposal is required.")})
+
+    assert_can_create_proposal(freelancer)
 
     contract = Contract.objects.create(
         job=job,

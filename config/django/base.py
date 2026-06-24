@@ -73,7 +73,8 @@ INSTALLED_APPS = [
     'users', 'accounts', 'freelancers', 'clients',
     'jobs', 'proposals', 'services', 'collabs',
     'notifications',
-    'payments', 'contracts', 'reviews',
+    'payments', 'billing',
+    'contracts', 'reviews',
 ]
 
 MIDDLEWARE = [

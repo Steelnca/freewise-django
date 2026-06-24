@@ -9,30 +9,23 @@ from django.core.exceptions import PermissionDenied
 from django.db.models import Count
 from django.shortcuts import get_object_or_404
 from django.utils.translation import gettext as _
+from django.core.exceptions import ValidationError
+from django.db import transaction
 
 from proposals.models import Proposal
 from proposals.serializers import ProposalSerializer, ProposalCreateSerializer
+from billing.services import assert_can_create_proposal, assert_can_post_job, assert_can_keep_active_job_count
 
 from .models import Category, Job, Tag
 from .serializers import (
     CategorySerializer,
     JobSerializer,
     JobWriteSerializer,
+    JobReadSerializer,
     TagSerializer,
     JobApplicantWorkspaceSerializer,
 )
-
-
-def _get_client_profile(user):
-    account = getattr(user, "account", None)
-    return getattr(account, "client_profile", None)
-
-
-def _ensure_client_profile(user):
-    client_profile = _get_client_profile(user)
-    if not client_profile:
-        raise PermissionDenied("You must have a client profile to perform this action.")
-    return client_profile
+from .utils import _ensure_client_profile, _get_client_profile, _wants_publish
 
 
 class JobListView(generics.ListAPIView):
@@ -80,44 +73,215 @@ class JobCreateView(generics.CreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = JobWriteSerializer
 
-    def perform_create(self, serializer):
-        client_profile = _ensure_client_profile(self.request.user)
-        serializer.save(client=client_profile)
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        client_profile = _ensure_client_profile(request.user)
 
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        publish = serializer.validated_data.pop("publish", False)
+
+        # Always save the work first as a draft, so nothing is lost.
+        job = serializer.save(
+            client=client_profile,
+            status=Job.Status.DRAFT,
+        )
+
+        published = False
+        publish_errors = None
+
+        if publish:
+            try:
+                assert_can_post_job(client_profile)
+                assert_can_keep_active_job_count(client_profile)
+
+                job.status = Job.Status.OPEN
+                job.save(update_fields=["status", "updated_at"])
+                published = True
+
+            except ValidationError as exc:
+                publish_errors = (
+                    exc.message_dict
+                    if hasattr(exc, "message_dict")
+                    else {"detail": exc.messages[0] if getattr(exc, "messages", None) else str(exc)}
+                )
+
+                # keep it safely saved as draft
+                if job.status != Job.Status.DRAFT:
+                    job.status = Job.Status.DRAFT
+                    job.save(update_fields=["status", "updated_at"])
+
+                # optional: report to you if this was caused by missing plan/config
+                # you can call your alert helper here if needed
+
+        response_data = JobReadSerializer(job).data
+        response_data["publish_blocked"] = bool(publish and not published)
+        response_data["published"] = published
+
+        if published:
+            response_data["detail"] = _("Job published successfully!")
+            return Response(response_data, status=status.HTTP_201_CREATED)
+
+        if publish:
+            response_data["detail"] = (
+                _("job was saved as a draft but was not published.")
+            )
+            if publish_errors:
+                response_data["publish_errors"] = publish_errors
+        else:
+            response_data["detail"] = _("Job saved as draft.")
+
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
 class JobUpdateView(generics.UpdateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = JobWriteSerializer
     lookup_field = "public_id"
-    lookup_url_kwarg = "public_id"
 
     def get_queryset(self):
-        client_profile = _get_client_profile(self.request.user)
-        if not client_profile:
-            return Job.objects.none()
+        client_profile = _ensure_client_profile(self.request.user)
 
-        return Job.objects.filter(client=client_profile).prefetch_related("tags")
+        return (
+            Job.objects
+            .filter(client=client_profile)
+            .prefetch_related("tags")
+        )
 
-    def perform_update(self, serializer):
-        _ensure_client_profile(self.request.user)
-        serializer.save()
-
-
-class JobDeleteView(generics.DestroyAPIView):
+class JobPublishView(APIView):
     permission_classes = [IsAuthenticated]
-    lookup_field = "public_id"
-    lookup_url_kwarg = "public_id"
 
-    def get_queryset(self):
-        client_profile = _get_client_profile(self.request.user)
-        if not client_profile:
-            return Job.objects.none()
+    @transaction.atomic
+    def post(self, request, public_id):
+        client_profile = _ensure_client_profile(request.user)
 
-        return Job.objects.filter(client=client_profile)
+        job = get_object_or_404(
+            Job.objects.select_for_update(),
+            public_id=public_id,
+            client=client_profile,
+        )
 
-    def perform_destroy(self, instance):
-        _ensure_client_profile(self.request.user)
-        instance.delete()
+        if job.status not in {
+            Job.Status.DRAFT,
+            Job.Status.PAUSED,
+        }:
+            raise ValidationError({
+                "detail": _("Only draft or paused jobs can be published.")
+            })
+
+        assert_can_keep_active_job_count(client_profile)
+
+        job.status = Job.Status.OPEN
+        job.save(
+            update_fields=[
+                "status",
+                "updated_at",
+            ]
+        )
+
+        return Response(
+            JobSerializer(job).data,
+            status=status.HTTP_200_OK,
+        )
+
+class JobPauseView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, public_id):
+        client_profile = _ensure_client_profile(request.user)
+
+        job = get_object_or_404(
+            Job.objects.select_for_update(),
+            public_id=public_id,
+            client=client_profile,
+        )
+
+        if job.status != Job.Status.OPEN:
+            raise ValidationError({
+                "detail": _("Only open jobs can be paused.")
+            })
+
+        job.status = Job.Status.PAUSED
+
+        job.save(
+            update_fields=[
+                "status",
+                "updated_at",
+            ]
+        )
+
+        return Response(
+            JobSerializer(job).data,
+            status=status.HTTP_200_OK,
+        )
+
+class JobCloseView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, public_id):
+        client_profile = _ensure_client_profile(request.user)
+
+        job = get_object_or_404(
+            Job.objects.select_for_update(),
+            public_id=public_id,
+            client=client_profile,
+        )
+
+        if job.status not in {
+            Job.Status.OPEN,
+            Job.Status.PAUSED,
+        }:
+            raise ValidationError({
+                "detail": _("Only open or paused jobs can be closed.")
+            })
+
+        job.status = Job.Status.CLOSED
+
+        job.save(
+            update_fields=[
+                "status",
+                "updated_at",
+            ]
+        )
+
+        return Response(
+            JobSerializer(job).data,
+            status=status.HTTP_200_OK,
+        )
+
+class JobArchiveView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, public_id):
+        client_profile = _ensure_client_profile(request.user)
+
+        job = get_object_or_404(
+            Job.objects.select_for_update(),
+            public_id=public_id,
+            client=client_profile,
+        )
+
+        if job.status == Job.Status.IN_PROGRESS:
+            raise ValidationError({
+                "detail": _("Cannot archive active jobs.")
+            })
+
+        job.status = Job.Status.ARCHIVED
+
+        job.save(
+            update_fields=[
+                "status",
+                "updated_at",
+            ]
+        )
+
+        return Response(
+            JobSerializer(job).data,
+            status=status.HTTP_200_OK,
+        )
 
 
 class JobCategoriesView(generics.ListAPIView):
@@ -219,7 +383,7 @@ class JobApplicantWorkspaceView(APIView):
 
         return Response(serializer.data)
 
-class JobApplicationSubmitView(APIView):
+class JobProposalSubmitView(APIView):
     """
     POST /api/jobs/<public_id>/submit
     Freelancer submits a proposal on a job.
@@ -269,6 +433,8 @@ class JobApplicationSubmitView(APIView):
                 {"detail": "You have already submitted a proposal for this job."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        assert_can_create_proposal(freelancer) # need testing
 
         serializer = ProposalCreateSerializer(data=request.data, context={"job": job})
         serializer.is_valid(raise_exception=True)

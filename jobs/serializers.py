@@ -4,16 +4,16 @@ from rest_framework import serializers
 from django.db import transaction
 from django.utils.translation import gettext as _
 
-from .models import Category, Job, Tag
-
-# If your milestone plan models live in another app, adjust this import.
 from contracts.models import MilestonePlan, MilestonePlanItem
 from contracts.serializers import ContractSerializer
 from proposals.serializers import ProposalSerializer
+from billing.services import assert_can_post_job
 
-MAX_MILESTONES = 10
-FIRST_MILESTONE_MAX_PERCENT = Decimal("35")
-LAST_MILESTONE_MIN_PERCENT = Decimal("15")
+from .models import Category, Job, Tag
+from .constants import (
+    MAX_MILESTONES, FIRST_MILESTONE_MAX_PERCENT, LAST_MILESTONE_MIN_PERCENT,
+    _status_value, USER_EDITABLE_STATUSES, SYSTEM_MANAGED_STATUSES, STATUS_TRANSITIONS
+)
 
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -129,9 +129,9 @@ class JobSerializer(serializers.ModelSerializer):
 
 
 class JobWriteSerializer(serializers.ModelSerializer):
-    category_id = serializers.PrimaryKeyRelatedField(
+    category = serializers.SlugRelatedField(
+        slug_field="slug",
         queryset=Category.objects.all(),
-        source="category",
         required=False,
         allow_null=True,
     )
@@ -154,14 +154,17 @@ class JobWriteSerializer(serializers.ModelSerializer):
         many=True,
         required=False,
     )
+
     milestone_plan = MilestonePlanInputSerializer(required=False, allow_null=True)
+
+    publish = serializers.BooleanField(write_only=True, required=False, default=False)
 
     class Meta:
         model = Job
         fields = (
             "title",
             "description",
-            "category_id",
+            "category",
             "tag_ids",
             "experience_level",
             "pricing_mode",
@@ -169,16 +172,19 @@ class JobWriteSerializer(serializers.ModelSerializer):
             "deadline",
             "allow_milestone_suggestions",
             "milestone_plan",
+            "publish",
         )
+
+    def validate_budget_total(self, value):
+        if value is None or Decimal(str(value)) <= 0:
+            raise serializers.ValidationError({
+                "budget_total": _("Budget total is required and must be greater than zero.")
+            })
+        return value
 
     def validate(self, attrs):
         pricing_mode = attrs.get("pricing_mode", getattr(self.instance, "pricing_mode", None))
         budget_total = attrs.get("budget_total", getattr(self.instance, "budget_total", None))
-
-        if budget_total is None or Decimal(str(budget_total)) <= 0:
-            raise serializers.ValidationError({
-                "budget_total": _("Budget total is required and must be greater than zero.")
-            })
 
         if pricing_mode not in Job.PricingMode.values:
             raise serializers.ValidationError({
@@ -250,6 +256,10 @@ class JobWriteSerializer(serializers.ModelSerializer):
             # No plan from client means the split will come later from freelancer proposal.
             attrs["split_owner"] = Job.SplitOwner.FREELANCER
 
+        publish = attrs.get("publish", False)
+        if publish and not attrs.get("title"):
+            raise serializers.ValidationError({"title": "Title is required to publish."})
+
         return attrs
 
     def _save_plan(self, job, plan_data):
@@ -311,6 +321,27 @@ class JobWriteSerializer(serializers.ModelSerializer):
             self._save_plan(job, plan_data)
 
         return job
+
+class JobReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Job
+        fields = [
+            "public_id",
+            "title",
+            "description",
+            "category",
+            "tags",
+            "experience_level",
+            "pricing_mode",
+            "budget_total",
+            "deadline",
+            "collab_allowed",
+            "allow_milestone_suggestions",
+            "split_owner",
+            "status",
+            "created_at",
+            "updated_at",
+        ]
 
 class JobApplicantWorkspaceSerializer(serializers.Serializer):
     job = JobSerializer()
