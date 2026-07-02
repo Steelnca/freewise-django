@@ -1,7 +1,7 @@
 
 import secrets
 import string
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -33,3 +33,18 @@ def _generate_prefixed_public_id(prefix: str, model_cls, length: int = 6, field_
         candidate = f"{prefix}-{_random_public_code(length)}"
         if not model_cls._base_manager.filter(**{field_name: candidate}).exists():
             return candidate
+
+def request_to_payload(request) -> Dict[str, Any]:
+    if isinstance(request.data, dict):
+        return request.data
+    return dict(request.data or {})
+
+def to_decimal(value: Any) -> Decimal:
+    return Decimal(str(value))
+
+def status_value(enum_cls, *names):
+    for name in names:
+        value = getattr(enum_cls, name, None)
+        if value is not None:
+            return value
+    return None

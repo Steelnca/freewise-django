@@ -8,160 +8,10 @@ All state changes happen in contracts/services.py.
 from rest_framework import serializers
 from decimal import Decimal
 
-from payments.models import PaymentAttempt
-from payments.services import refresh_payment_attempt_from_provider
+from milestones.models import Milestone
+from milestones.serializers import MilestoneSerializer, MilestonePlanSerializer
 
-from .models import Contract, Milestone, ContractEvent, MilestonePlan, MilestonePlanItem, MilestoneSubmission
-
-
-class MilestonePlanItemSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = MilestonePlanItem
-        fields = [
-            "public_id",
-            "title",
-            "description",
-            "amount",
-            "due_date",
-            "order",
-            "status",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = ["public_id", "status", "created_at", "updated_at"]
-
-class MilestonePlanSerializer(serializers.ModelSerializer):
-    items = MilestonePlanItemSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = MilestonePlan
-        fields = [
-            "public_id",
-            "proposal",
-            "created_by",
-            "status",
-            "note",
-            "total_amount",
-            "currency",
-            "suggestion_enabled",
-            "items",
-            "is_selected",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = ["public_id", "total_amount", "created_at", "updated_at"]
-
-class MilestoneSerializer(serializers.ModelSerializer):
-    status_label = serializers.CharField(source="get_status_display", read_only=True)
-    latest_payment_attempt_id = serializers.SerializerMethodField()
-    latest_payment_attempt_internal_status = serializers.SerializerMethodField()
-    latest_payment_attempt_provider_status = serializers.SerializerMethodField()
-    latest_payment_attempt_checkout_url = serializers.SerializerMethodField()
-    latest_payment_attempt_retryable = serializers.SerializerMethodField()
-    source_item_public_id = serializers.CharField(source="proposal.public_id", read_only=True, allow_null=True)
-    can_submit = serializers.SerializerMethodField()
-    can_fund = serializers.SerializerMethodField()
-    can_approve = serializers.SerializerMethodField()
-    can_request_revision = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Milestone
-        fields = (
-            "public_id",
-            "source_item_public_id",
-            "proposal_id",
-            "title",
-            "description",
-            "currency",
-            "amount",
-            "due_date",
-            "order",
-            "status",
-            "status_label",
-            "submission_note",
-            "submission_link",
-            "review_note",
-            "revision_note",
-            "dispute_reason",
-            "submitted_at",
-            "approved_at",
-            "released_at",
-            "funded_at",
-            "refunded_at",
-            "disputed_at",
-            "revision_scope",
-            "revision_requested_at",
-            "review_due_at",
-            "created_at",
-            "updated_at",
-            "latest_payment_attempt_id",
-            "latest_payment_attempt_internal_status",
-            "latest_payment_attempt_provider_status",
-            "latest_payment_attempt_checkout_url",
-            "latest_payment_attempt_retryable",
-            "can_submit",
-            "can_fund",
-            "can_approve",
-            "can_request_revision",
-        )
-        read_only_fields = fields
-
-    def _latest_payment_attempt(self, obj):
-        cached = getattr(obj, "_latest_payment_attempt", None)
-        if cached is not None:
-            return cached
-
-        attempt = (
-            obj.payment_attempts.order_by("-attempt_number", "-created_at").first()
-        )
-
-        if attempt and not attempt.is_final:
-            attempt = refresh_payment_attempt_from_provider(attempt=attempt)
-
-        obj._latest_payment_attempt = attempt
-        return attempt
-
-    def get_latest_payment_attempt_id(self, obj):
-        attempt = self._latest_payment_attempt(obj)
-        return str(attempt.attempt_id) if attempt else None
-
-    def get_latest_payment_attempt_internal_status(self, obj):
-        attempt = self._latest_payment_attempt(obj)
-        return attempt.internal_status if attempt else None
-
-    def get_latest_payment_attempt_provider_status(self, obj):
-        attempt = self._latest_payment_attempt(obj)
-        return attempt.provider_status if attempt else None
-
-    def get_latest_payment_attempt_checkout_url(self, obj):
-        attempt = self._latest_payment_attempt(obj)
-        return attempt.provider_checkout_url if attempt else None
-
-    def get_latest_payment_attempt_retryable(self, obj):
-        attempt = self._latest_payment_attempt(obj)
-        if not attempt:
-            return False
-
-        return attempt.internal_status in {
-            PaymentAttempt.InternalStatus.FAILED,
-            PaymentAttempt.InternalStatus.CANCELED,
-            PaymentAttempt.InternalStatus.EXPIRED,
-        }
-
-    def get_can_submit(self, obj):
-        return obj.status in [
-            Milestone.Status.FUNDED,
-            Milestone.Status.REVISION_REQUESTED,
-        ]
-
-    def get_can_fund(self, obj):
-        return obj.status == Milestone.Status.PENDING
-
-    def get_can_approve(self, obj):
-        return obj.status == Milestone.Status.SUBMITTED
-
-    def get_can_request_revision(self, obj):
-        return obj.status == Milestone.Status.SUBMITTED
+from .models import Contract, ContractEvent
 
 class ContractSerializer(serializers.ModelSerializer):
     client_username = serializers.CharField(source="client.account.user.username", read_only=True)
@@ -418,22 +268,6 @@ class ContractSerializer(serializers.ModelSerializer):
             milestone, context=self.context,
         ).data
 
-class MilestoneActionSerializer(serializers.Serializer):
-    note = serializers.CharField(required=False, allow_blank=True, default="")
-    submission_note = serializers.CharField(required=False, allow_blank=True, default="")
-    review_note = serializers.CharField(required=False, allow_blank=True, default="")
-    revision_note = serializers.CharField(required=False, allow_blank=True, default="")
-    revision_scope = serializers.CharField(required=False, allow_blank=True, default="")
-    submission_link = serializers.URLField(required=False, allow_blank=True, default="")
-    reason = serializers.CharField(required=False, allow_blank=True, default="")
-
-class MilestoneCreateSerializer(serializers.Serializer):
-    title = serializers.CharField(max_length=255)
-    description = serializers.CharField(required=False, allow_blank=True, default="")
-    amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal("0.01"))
-    due_date = serializers.DateField()
-    order = serializers.IntegerField(min_value=1)
-
 class ContractEventSerializer(serializers.ModelSerializer):
     event_type = serializers.CharField(read_only=True)
     actor_username = serializers.CharField(source="actor.account.user.username", read_only=True)
@@ -451,17 +285,3 @@ class ContractEventSerializer(serializers.ModelSerializer):
         )
         read_only_fields = fields
 
-class MilestoneSubmissionSerializer(serializers.ModelSerializer):
-    milestone_public_id = serializers.CharField(source="milestone.public_id", read_only=True)
-    class Meta:
-        model = MilestoneSubmission
-        fields = [
-            "public_id",
-            "milestone_public_id",
-            "submitted_by",
-            "note",
-            "external_link",
-            "payload",
-            "status",
-            "submitted_at",
-        ]

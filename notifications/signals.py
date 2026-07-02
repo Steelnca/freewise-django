@@ -66,7 +66,7 @@ def on_contract_saved(sender, instance, created, **kwargs):
 
 # ── Milestones ────────────────────────────────────────────────────────────────
 
-@receiver(post_save, sender='contracts.Milestone')
+@receiver(post_save, sender='milestones.Milestone')
 def on_milestone_saved(sender, instance, created, **kwargs):
     if created:
         return

@@ -28,6 +28,7 @@ urlpatterns = [
 
     # API — Contracts & Payments
     path('api/contracts/',     include('contracts.urls')),
+    path('api/milestones/',     include('milestones.urls')),
     path('api/payments/',      include('payments.urls')),
     path("api/billing/", include("billing.urls")),
 

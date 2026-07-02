@@ -1,18 +1,21 @@
-"""
-Freewise contract services.
+"""Freewise contract services.
 
-This is the only place where contract and milestone state should change.
+This file keeps runtime contract execution here:
+- contract access
+- contract state changes
+- funding / release / refund
+- milestone submission and approval
+- dispute resolution
+- contract completion
 
-Rules:
-- views should call these helpers
-- payment hooks should call these helpers
-- no direct milestone.status edits in random places
+Milestone plan parsing, validation, and plan-item replacement live in
+milestones/services.py.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
 from decimal import Decimal
+from typing import Any, Dict, List, Optional
 
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
@@ -20,42 +23,38 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from proposals.models import Proposal
-from jobs.models import Job
-from billing.services import assert_can_create_proposal
+from core.access import (
+    ensure_contract_party_access,
+    ensure_milestone_access,
+)
+from payments.constants import DEFAULT_CURRENCY as PAYMENTS_DEFAULT_CURRENCY
 from payments.models import EscrowHold
 from payments.services import (
-    DEFAULT_CURRENCY as PAYMENTS_DEFAULT_CURRENCY,
     EscrowHoldError,
-    calculate_platform_fee,
-    get_or_create_platform_wallet,
     get_or_create_wallet_for_user,
     hold_funds_for_escrow,
     release_escrow_hold_to_wallet,
     refund_escrow_hold,
-    normalize_money,
-    milestone_has_settled_or_paid_payment,
 )
 
-from .models import Contract, Milestone, ContractEvent, MilestoneSubmission, MilestonePlan, MilestonePlanItem
-from .constants import MAX_FIRST_MILESTONE_PERCENT, MAX_MILESTONES, MIN_LAST_MILESTONE_PERCENT
+from milestones.models import Milestone, MilestoneSubmission, MilestonePlan, MilestonePlanItem
+
+from .models import Contract, ContractEvent
+
 
 TERMINAL_MILESTONE_STATUSES = {
     Milestone.Status.RELEASED,
     Milestone.Status.REFUNDED,
 }
 
+
 def contract_reference_for_milestone(milestone: Milestone) -> str:
-    """
-    Stable reference string used by payments. Keep it predictable.
-    """
+    """Stable reference string used by payments."""
     return f"contract:{milestone.contract.public_id}:milestone:{milestone.public_id}"
 
 
 def get_user_contracts_queryset(user):
-    """
-    Return contracts where the authenticated user is a party.
-    """
+    """Return contracts where the authenticated user is a party."""
     account = getattr(user, "account", None)
     client = getattr(account, "client_profile", None)
     freelancer = getattr(account, "freelancer_profile", None)
@@ -66,6 +65,7 @@ def get_user_contracts_queryset(user):
             "freelancer__account__user",
             "job",
             "proposal",
+            "source_plan",
         )
         .prefetch_related("milestones")
         .distinct()
@@ -81,9 +81,7 @@ def get_user_contracts_queryset(user):
 
 
 def get_party_contract_queryset(user, pk: Optional[int] = None):
-    """
-    Shared access helper for list/detail views.
-    """
+    """Shared access helper for list/detail views."""
     qs = get_user_contracts_queryset(user)
     if pk is not None:
         qs = qs.filter(pk=pk)
@@ -91,84 +89,35 @@ def get_party_contract_queryset(user, pk: Optional[int] = None):
 
 
 def ensure_party_access(contract: Contract, user) -> None:
-    """
-    Enforce that only the two contract parties can touch it.
-    """
-    account = getattr(user, "account", None)
-    client = getattr(account, "client_profile", None)
-    freelancer = getattr(account, "freelancer_profile", None)
-
-    if client and contract.client_id == client.id:
-        return
-    if freelancer and contract.freelancer_id == freelancer.id:
-        return
-
-    raise PermissionDenied(_("You are not allowed to access this contract."))
+    """Compatibility wrapper for existing views."""
+    ensure_contract_party_access(contract, user)
 
 
-def ensure_milestone_access(milestone: Milestone, user) -> None:
-    """
-    Enforce access through the parent contract.
-    """
-    ensure_party_access(milestone.contract, user)
+def ensure_milestone_contract_access(milestone: Milestone, user) -> None:
+    """Compatibility wrapper for existing views."""
+    ensure_milestone_access(milestone, user)
 
 
-def _payload(request) -> Dict[str, Any]:
-    if isinstance(request.data, dict):
-        return request.data
-    return dict(request.data or {})
-
-
-def _to_decimal(value: Any) -> Decimal:
-    return Decimal(str(value))
-
-
-def _user_client_profile(user):
-    account = getattr(user, "account", None)
-    return getattr(account, "client_profile", None)
-
-
-def _user_freelancer_profile(user):
-    account = getattr(user, "account", None)
-    return getattr(account, "freelancer_profile", None)
-
-
-def _job_client_profile(job):
-    for attr in ("client", "client_profile", "owner", "client_user"):
-        value = getattr(job, attr, None)
-        if value is not None:
-            return value
-    return None
-
-def _set_contract_state(
+def set_contract_state(
     contract: Contract,
     status: str,
     *,
     timestamp_field: Optional[str] = None,
     note: Optional[str] = None,
 ) -> Contract:
-    """
-    Central state updater for contracts.
-    """
+    """Central state updater for contracts."""
     contract.status = status
     if timestamp_field:
         setattr(contract, timestamp_field, timezone.now())
     if note is not None:
         contract.notes = note
-
     contract.full_clean()
     contract.save()
     return contract
 
 
-def _milestones_total(contract):
-    return sum((m.amount for m in contract.milestones.all()), Decimal("0.00"))
-
-
 def log_contract_event(*, contract: Contract, event_type: str, actor=None, metadata=None) -> None:
-    """
-    Write one immutable contract activity record.
-    """
+    """Write one immutable contract activity record."""
     ContractEvent.objects.create(
         contract=contract,
         event_type=event_type,
@@ -177,206 +126,13 @@ def log_contract_event(*, contract: Contract, event_type: str, actor=None, metad
     )
 
 
-def _get_milestone_hold(milestone: Milestone):
-    """
-    Look up the escrow hold tied to a milestone contract reference.
-    """
-    return (
-        EscrowHold.objects.select_for_update()
-        .filter(contract_reference=contract_reference_for_milestone(milestone))
-        .first()
-    )
+def ensure_contract_field_exists(field_name: str) -> bool:
+    try:
+        Contract._meta.get_field(field_name)
+        return True
+    except Exception:
+        return False
 
-def _job_currency(job) -> str:
-    for attr in ("currency", "default_currency"):
-        value = getattr(job, attr, None)
-        if value:
-            return str(value)
-    return "DZD"
-
-
-def _plan_mode(plan: MilestonePlan) -> str:
-    for attr in ("mode", "milestone_mode"):
-        value = getattr(plan, attr, None)
-        if value:
-            return str(value).upper()
-    raise ValidationError({"detail": _("Milestone plan mode is missing.")})
-
-
-def _ensure_contract_party_access(contract: Contract, user) -> None:
-    client = _user_client_profile(user)
-    freelancer = _user_freelancer_profile(user)
-
-    if client and contract.client_id == client.id:
-        return
-    if freelancer and contract.freelancer_id == freelancer.id:
-        return
-
-    raise PermissionDenied(_("You are not allowed to access this contract."))
-
-def _ensure_job_party_access(job: Job, user, proposal: Proposal | None = None) -> str:
-    client = _user_client_profile(user)
-    freelancer = _user_freelancer_profile(user)
-
-    if client and job.client_id == client.id:
-        return "client"
-
-    if proposal is not None and freelancer and proposal.freelancer_id == freelancer.id:
-        return "freelancer"
-
-    if freelancer and proposal is None and job.proposals.filter(freelancer=freelancer).exists():
-        return "freelancer"
-
-    raise PermissionDenied(_("You are not allowed to access this job plan."))
-
-def _ensure_proposal_party_access(proposal: Proposal, user) -> None:
-    client = _user_client_profile(user)
-    freelancer = _user_freelancer_profile(user)
-    job_client = _job_client_profile(proposal.job)
-
-    if client and job_client and getattr(job_client, "id", None) == client.id:
-        return
-    if freelancer and proposal.freelancer_id == freelancer.id:
-        return
-
-    raise PermissionDenied(_("You are not allowed to access this proposal."))
-
-
-def _item_source_for_user(user) -> str:
-    if _user_client_profile(user):
-        return MilestonePlanItem.SourceRole.CLIENT
-    return MilestonePlanItem.SourceRole.FREELANCER
-
-
-def _sum_items(items: List[MilestonePlanItem]) -> Decimal:
-    total = Decimal("0.00")
-    for item in items:
-        total += item.amount
-    return total
-
-
-def _plan_items_payload(items_raw: Any) -> List[Dict[str, Any]]:
-    if not isinstance(items_raw, list):
-        raise ValidationError({"items": _("Milestone items must be a list.")})
-
-    items: List[Dict[str, Any]] = []
-    for index, raw in enumerate(items_raw, start=1):
-        if not isinstance(raw, dict):
-            raise ValidationError({"items": _("Each milestone item must be an object.")})
-
-        title = str(raw.get("title") or "").strip()
-        amount_raw = raw.get("amount")
-        due_date = raw.get("due_date")
-
-        if not title:
-            raise ValidationError({"items": _("Each milestone item must have a title.")})
-        if amount_raw in (None, ""):
-            raise ValidationError({"items": _("Each milestone item must have an amount.")})
-        if not due_date:
-            raise ValidationError({"items": _("Each milestone item must have a due date.")})
-
-        items.append(
-            {
-                "title": title,
-                "description": str(raw.get("description") or "").strip(),
-                "amount": _to_decimal(amount_raw),
-                "due_date": due_date,
-                "order": int(raw.get("order") or index),
-                "source": str(raw.get("source") or "").upper().strip(),
-                "metadata": raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {},
-            }
-        )
-
-    return items
-
-
-def _replace_plan_items(plan: MilestonePlan, items_payload: List[Dict[str, Any]]) -> List[MilestonePlanItem]:
-    plan.items.all().delete()
-
-    created: List[MilestonePlanItem] = []
-    for item_data in items_payload:
-        item = MilestonePlanItem.objects.create(
-            plan=plan,
-            title=item_data["title"],
-            description=item_data["description"],
-            amount=item_data["amount"],
-            due_date=item_data["due_date"],
-            order=item_data["order"],
-            status=MilestonePlanItem.Status.DRAFT,
-            metadata=item_data["metadata"],
-        )
-        created.append(item)
-
-    return created
-
-
-def _validate_plan_rules(plan: MilestonePlan) -> Decimal:
-    items = list(plan.items.order_by("order", "created_at"))
-    total = _sum_items(items)
-
-    if not items:
-        raise ValidationError({"detail": _("Milestone plan must have at least one item.")})
-
-    if len(items) > MAX_MILESTONES:
-        raise ValidationError({"detail": _(f"Maximum {MAX_MILESTONES} milestones are allowed.")})
-
-    mode = _plan_mode(plan)
-    pricing_mode = getattr(plan.job, "pricing_mode", None)
-    budget_total = getattr(plan.job, "budget_total", None)
-
-
-    if not items:
-        raise ValidationError({"detail": _("Milestone plan must have at least one item.")})
-
-    if mode == "SINGLE" and len(items) != 1:
-        raise ValidationError({"detail": _("Single milestone mode allows exactly one item.")})
-
-    if budget_total is None:
-        raise ValidationError({"detail": _("Fixed-price plans require a budget total.")})
-
-    if pricing_mode is None:
-        raise ValidationError({"detail": _("Contract require job pricing mode.")})
-
-    if pricing_mode == Job.PricingMode.FIXED and not total == budget_total:
-        raise ValidationError({"detail": _("Milestones must equal the fixed budget total.")})
-
-    if len(items) > 1:
-        basis = budget_total or total
-        first_cap = basis * MAX_FIRST_MILESTONE_PERCENT / Decimal("100")
-        last_floor = basis * MIN_LAST_MILESTONE_PERCENT / Decimal("100")
-
-        if items[0].amount > first_cap:
-            raise ValidationError({"detail": _("The first milestone amount is too large.")})
-        if items[-1].amount < last_floor:
-            raise ValidationError({"detail": _("The last milestone amount is too small.")})
-
-    plan.total_amount = total
-    plan.save(update_fields=["total_amount", "updated_at"])
-    return total
-
-def _get_or_create_active_plan(*, job: Job, proposal: Proposal | None, created_by, source_role: str) -> MilestonePlan:
-    active_plan = (
-        MilestonePlan.objects.filter(
-            job=job,
-            proposal=proposal,
-            status__in=[MilestonePlan.Status.DRAFT, MilestonePlan.Status.PROPOSED],
-        )
-        .order_by("-created_at")
-        .first()
-    )
-
-    if active_plan:
-        return active_plan
-
-    return MilestonePlan.objects.create(
-        job=job,
-        proposal=proposal,
-        created_by=created_by,
-        source_role=source_role,
-        status=MilestonePlan.Status.DRAFT,
-        suggestion_enabled=True,
-        currency=_job_currency(job),
-    )
 
 def fund_milestone_from_payment(
     *,
@@ -387,8 +143,7 @@ def fund_milestone_from_payment(
     initiated_by=None,
     metadata: Optional[dict] = None,
 ) -> Milestone:
-    """
-    Called after a payment succeeds.
+    """Called after a payment succeeds.
 
     It locks escrow for this milestone and moves the milestone into FUNDED.
     """
@@ -464,363 +219,17 @@ def fund_milestone_from_payment(
     return milestone
 
 
-@transaction.atomic
-def submit_milestone(
-    *,
-    milestone: Milestone,
-    user,
-    submission_note: str = "",
-    submission_link: str = "",
-    payload: dict = {},
-) -> MilestoneSubmission:
-    """
-    Freelancer submits work for review.
-    """
-    ensure_milestone_access(milestone, user)
-
-    account = getattr(user, "account", None)
-    freelancer = getattr(account, "freelancer_profile", None)
-    if not freelancer or milestone.contract.freelancer_id != freelancer.id:
-        raise PermissionDenied(_("Only the assigned freelancer can submit this milestone."))
-
-    milestone = Milestone.objects.select_for_update().select_related("contract").get(
-        pk=milestone.pk
-    )
-
-    if milestone.contract.status in {
-        Contract.Status.CANCELLED,
-        Contract.Status.WITHDRAWN,
-        Contract.Status.SUSPENDED,
-        Contract.Status.COMPLETED,
-    }:
-        raise ValidationError({"status": _("This contract is not accepting submissions.")})
-
-    if milestone.status not in {
-        Milestone.Status.FUNDED,
-        Milestone.Status.REVISION_REQUESTED,
-    }:
-        raise ValidationError({"status": _("This milestone cannot be submitted in its current state.")})
-
-    if not milestone_has_settled_or_paid_payment(milestone=milestone):
-        raise ValidationError({"status": _("This milestone has no settled or completed payment attempts.")})
-
-    submission = MilestoneSubmission.objects.create(
-        milestone=milestone,
-        submitted_by=user,
-        note=submission_note,
-        external_link=submission_link,
-        payload=payload or {},
-    )
-
-    milestone.status = Milestone.Status.SUBMITTED
-    milestone.submission_link = submission_link or milestone.submission_link
-    milestone.submission_note = submission_note or milestone.submission_note
-    milestone.submitted_at = timezone.now()
-    milestone.full_clean()
-    milestone.save()
-
-    log_contract_event(
-        contract=milestone.contract,
-        event_type=ContractEvent.ContractEventType.MILESTONE_SUBMITTED,
-        actor=user,
-        metadata={"milestone_public_id": milestone.public_id},
-    )
-
-    return submission
 
 
-@transaction.atomic
-def request_revision(
-    *,
-    milestone: Milestone,
-    user,
-    revision_note: str = "",
-    revision_scope: str = "",
-) -> Milestone:
-    """
-    Client asks for changes on a submitted milestone.
-    """
-    ensure_milestone_access(milestone, user)
-
-    account = getattr(user, "account", None)
-    client = getattr(account, "client_profile", None)
-    if not client or milestone.contract.client_id != client.id:
-        raise PermissionDenied(_("Only the client can request a revision."))
-
-    milestone = Milestone.objects.select_for_update().select_related("contract").get(pk=milestone.pk)
-
-    if milestone.contract.status in {
-        Contract.Status.CANCELLED,
-        Contract.Status.WITHDRAWN,
-        Contract.Status.SUSPENDED,
-        Contract.Status.COMPLETED,
-    }:
-        raise ValidationError({"status": _("This contract is not accepting revisions.")})
-
-    if milestone.status != Milestone.Status.SUBMITTED:
-        raise ValidationError({"status": _("Only submitted milestones can be revised.")})
-
-    milestone.status = Milestone.Status.REVISION_REQUESTED
-    milestone.revision_note = revision_note or milestone.revision_note
-    milestone.revision_scope = revision_scope or milestone.revision_scope
-    milestone.revision_requested_at = timezone.now()
-    milestone.full_clean()
-    milestone.save()
-
-    log_contract_event(
-        contract=milestone.contract,
-        event_type=ContractEvent.ContractEventType.MILESTONE_REVISION_REQUESTED,
-        actor=user,
-        metadata={
-            "milestone_public_id": milestone.public_id,
-            "revision_scope": revision_scope,
-            "revision_note": revision_note,
-        },
-    )
-
-    return milestone
-
-
-@transaction.atomic
-def approve_milestone(
-    *,
-    milestone: Milestone,
-    user,
-    review_note: str = "",
-) -> Milestone:
-    """
-    Client accepts delivered work.
-
-    Escrow is released.
-    Platform fee is deducted.
-    Milestone becomes RELEASED.
-    Contract may become COMPLETED.
-    """
-    ensure_milestone_access(milestone, user)
-
-    account = getattr(user, "account", None)
-    client = getattr(account, "client_profile", None)
-    if not client or milestone.contract.client_id != client.id:
-        raise PermissionDenied(_("Only the client can approve this milestone."))
-
-    milestone = (
-        Milestone.objects
-        .select_for_update()
-        .select_related(
-            "contract",
-            "contract__client",
-            "contract__freelancer",
-        )
-        .get(pk=milestone.pk)
-    )
-
-    if milestone.contract.status in {
-        Contract.Status.CANCELLED,
-        Contract.Status.WITHDRAWN,
-        Contract.Status.SUSPENDED,
-        Contract.Status.COMPLETED,
-    }:
-        raise ValidationError({"status": _("This contract cannot be approved right now.")})
-
-    if milestone.status != Milestone.Status.SUBMITTED:
-        raise ValidationError({"status": _("Only submitted milestones can be approved.")})
-
-    if not milestone_has_settled_or_paid_payment(milestone=milestone):
-        raise ValidationError({"status": _("This milestone has no settled or completed payment attempts.")})
-
-    contract = milestone.contract
-
-    hold = _get_milestone_hold(milestone)
-    if not hold:
-        raise EscrowHoldError(_("Escrow hold not found for this milestone."))
-
-    freelancer_wallet = get_or_create_wallet_for_user(
-        contract.freelancer.account.user,
-        currency=contract.currency or PAYMENTS_DEFAULT_CURRENCY,
-    )
-    fee_wallet = get_or_create_platform_wallet(contract.currency or PAYMENTS_DEFAULT_CURRENCY)
-
-    gross_amount = normalize_money(milestone.amount)
-    platform_fee_amount = calculate_platform_fee(gross_amount)
-    net_amount = normalize_money(gross_amount - platform_fee_amount)
-
-    release_escrow_hold_to_wallet(
-        hold=hold,
-        recipient_wallet=freelancer_wallet,
-        idempotency_key=f"milestone:{milestone.public_id}:approve",
-        initiated_by=user,
-        release_amount=net_amount,
-        fee_wallet=fee_wallet,
-        fee_amount=platform_fee_amount,
-        reference_type="milestone",
-        reference_id=str(milestone.public_id),
-        description=f"Milestone #{milestone.public_id} approved.",
-        metadata={
-            "contract_public_id": milestone.contract.public_id,
-            "milestone_public_id": milestone.public_id,
-            "fee_amount": str(platform_fee_amount),
-        },
-    )
-
-    milestone.status = Milestone.Status.RELEASED
-    milestone.approved_at = timezone.now()
-    milestone.released_at = timezone.now()
-    if review_note:
-        milestone.review_note = review_note
-
-    milestone.full_clean()
-    milestone.save(
-        update_fields=[
-            "status",
-            "approved_at",
-            "released_at",
-            "review_note",
-            "updated_at",
-        ]
-    )
-
-    log_contract_event(
-        contract=contract,
-        actor=user,
-        event_type=ContractEvent.ContractEventType.MILESTONE_APPROVED,
-        metadata={
-            "milestone_public_id": milestone.public_id,
-            "amount": str(milestone.amount),
-            "fee_amount": str(platform_fee_amount),
-        },
-    )
-
-    sync_contract_completion(contract)
-
-    return milestone
-
-
-@transaction.atomic
-def open_dispute(
-    *,
-    milestone: Milestone,
-    user,
-    dispute_reason: str = "",
-) -> Milestone:
-    """
-    Open a dispute and freeze the milestone until moderation resolves it.
-    """
-    ensure_milestone_access(milestone, user)
-
-    account = getattr(user, "account", None)
-    client = getattr(account, "client_profile", None)
-    if not client or milestone.contract.client_id != client.id:
-        raise PermissionDenied(_("Only the client can open a dispute from this endpoint."))
-
-    milestone = Milestone.objects.select_for_update().select_related("contract").get(
-        pk=milestone.pk
-    )
-
-    if milestone.contract.status in {
-        Contract.Status.CANCELLED,
-        Contract.Status.WITHDRAWN,
-        Contract.Status.COMPLETED,
-    }:
-        raise ValidationError({"status": _("This contract cannot be disputed.")})
-
-    if milestone.status not in {
-        Milestone.Status.SUBMITTED,
-        Milestone.Status.REVISION_REQUESTED,
-    }:
-        raise ValidationError({"status": _("This milestone cannot be disputed in its current state.")})
-
-    hold = _get_milestone_hold(milestone)
-
-    if hold and hold.status == EscrowHold.Status.ACTIVE:
-        hold.status = EscrowHold.Status.DISPUTED
-        hold.resolution_note = dispute_reason or _("Milestone disputed.")
-        hold.save(update_fields=["status", "resolution_note", "updated_at"])
-
-    milestone.status = Milestone.Status.DISPUTED
-    milestone.dispute_reason = dispute_reason or milestone.dispute_reason
-    milestone.disputed_at = timezone.now()
-    milestone.full_clean()
-    milestone.save()
-
-    log_contract_event(
-        contract=milestone.contract,
-        event_type=ContractEvent.ContractEventType.MILESTONE_DISPUTED,
-        actor=user,
-        metadata={"milestone_public_id": milestone.public_id},
-    )
-
-    _set_contract_state(
-        milestone.contract,
-        Contract.Status.SUSPENDED,
-        timestamp_field="suspended_at",
-        note=dispute_reason or milestone.contract.notes,
-    )
-
-    return milestone
-
-
-@transaction.atomic
-def refund_milestone(
-    *,
-    milestone: Milestone,
-    user,
-    refund_note: str = "",
-) -> Milestone:
-    """
-    Refund a disputed or cancelled milestone back to the client wallet.
-    """
-    ensure_milestone_access(milestone, user)
-
-    milestone = Milestone.objects.select_for_update().select_related(
-        "contract",
-        "contract__client__account__user",
-    ).get(pk=milestone.pk)
-
-    hold = _get_milestone_hold(milestone)
-    if not hold:
-        raise EscrowHoldError(_("Escrow hold not found for this milestone."))
-
-    refund_escrow_hold(
-        hold=hold,
-        idempotency_key=f"milestone:{milestone.public_id}:refund",
-        initiated_by=user,
-        amount=milestone.amount,
-        reference_type="milestone",
-        reference_id=str(milestone.public_id),
-        description=refund_note or _("Milestone refunded."),
-        metadata={
-            "contract_public_id": milestone.contract.public_id,
-            "milestone_public_id": milestone.public_id,
-        },
-    )
-
-    milestone.status = Milestone.Status.REFUNDED
-    milestone.refunded_at = timezone.now()
-    milestone.full_clean()
-    milestone.save()
-
-    log_contract_event(
-        contract=milestone.contract,
-        event_type=ContractEvent.ContractEventType.MILESTONE_REFUNDED,
-        actor=user,
-        metadata={"milestone_public_id": milestone.public_id, "refund_note": refund_note},
-    )
-
-    sync_contract_completion(milestone.contract)
-
-    return milestone
 
 
 @transaction.atomic
 def cancel_contract(*, contract: Contract, user, reason: str = "") -> Contract:
-    """
-    Cancel a contract when no active delivery should continue.
+    """Cancel a contract when no active delivery should continue.
 
-    If the contract already started, we treat the stop as WITHDRAWN and
-    refund any still-held escrowed milestones.
+    If the contract already started, we treat the stop as WITHDRAWN and refund any still-held escrowed milestones.
     """
-    ensure_party_access(contract, user)
-
+    ensure_contract_party_access(contract, user)
     contract = (
         Contract.objects.select_for_update()
         .prefetch_related("milestones")
@@ -846,7 +255,6 @@ def cancel_contract(*, contract: Contract, user, reason: str = "") -> Contract:
             Milestone.Status.REVISION_REQUESTED,
             Milestone.Status.DISPUTED,
         }
-
         for milestone in contract.milestones.filter(status__in=refundable_statuses).order_by("order", "created_at"):
             hold = _get_milestone_hold(milestone)
             if hold and hold.status in {EscrowHold.Status.ACTIVE, EscrowHold.Status.DISPUTED}:
@@ -864,18 +272,17 @@ def cancel_contract(*, contract: Contract, user, reason: str = "") -> Contract:
                         "reason": reason,
                     },
                 )
+                milestone.status = Milestone.Status.REFUNDED
+                milestone.refunded_at = timezone.now()
+                milestone.full_clean()
+                milestone.save(update_fields=["status", "refunded_at", "updated_at"])
 
-            milestone.status = Milestone.Status.REFUNDED
-            milestone.refunded_at = timezone.now()
-            milestone.full_clean()
-            milestone.save(update_fields=["status", "refunded_at", "updated_at"])
-
-            log_contract_event(
-                contract=contract,
-                event_type=ContractEvent.ContractEventType.MILESTONE_REFUNDED,
-                actor=user,
-                metadata={"milestone_public_id": milestone.public_id, "reason": reason},
-            )
+                log_contract_event(
+                    contract=contract,
+                    event_type=ContractEvent.ContractEventType.MILESTONE_REFUNDED,
+                    actor=user,
+                    metadata={"milestone_public_id": milestone.public_id, "reason": reason},
+                )
 
         _set_contract_state(
             contract,
@@ -883,7 +290,6 @@ def cancel_contract(*, contract: Contract, user, reason: str = "") -> Contract:
             timestamp_field="withdrawn_at",
             note=reason or contract.notes,
         )
-
         log_contract_event(
             contract=contract,
             event_type=ContractEvent.ContractEventType.CONTRACT_WITHDRAWN,
@@ -898,20 +304,18 @@ def cancel_contract(*, contract: Contract, user, reason: str = "") -> Contract:
         timestamp_field="cancelled_at",
         note=reason or contract.notes,
     )
-
     log_contract_event(
         contract=contract,
         event_type=ContractEvent.ContractEventType.CONTRACT_CANCELLED,
         actor=user,
         metadata={"reason": reason},
     )
-
     return contract
 
 
 @transaction.atomic
 def create_milestone(*, contract, user, title, description, amount, due_date, order):
-    ensure_party_access(contract, user)
+    ensure_contract_party_access(contract, user)
 
     account = getattr(user, "account", None)
     client = getattr(account, "client_profile", None)
@@ -919,7 +323,6 @@ def create_milestone(*, contract, user, title, description, amount, due_date, or
         raise PermissionDenied(_("Only the client can create milestones."))
 
     contract = Contract.objects.select_for_update().get(pk=contract.pk)
-
     if contract.status != Contract.Status.PENDING_FUNDING:
         raise ValidationError({"detail": _("Milestones can only be edited before funding starts.")})
 
@@ -944,14 +347,12 @@ def create_milestone(*, contract, user, title, description, amount, due_date, or
         actor=user,
         metadata={"milestone_public_id": milestone.public_id},
     )
-
     return milestone
 
 
 @transaction.atomic
 def sync_contract_completion(contract: Contract) -> Contract:
-    """
-    Keep the contract status aligned with the milestone lifecycle.
+    """Keep the contract status aligned with the milestone lifecycle.
 
     - Disputed milestone -> SUSPENDED
     - All pending -> PENDING_FUNDING
@@ -993,7 +394,6 @@ def sync_contract_completion(contract: Contract) -> Contract:
         Milestone.Status.REVISION_REQUESTED,
         Milestone.Status.RELEASED,
     }
-
     any_active = milestones.filter(status__in=active_statuses).exists()
     any_refunded = milestones.filter(status=Milestone.Status.REFUNDED).exists()
     all_terminal = not milestones.exclude(status__in=TERMINAL_MILESTONE_STATUSES).exists()
@@ -1028,10 +428,7 @@ def sync_contract_completion(contract: Contract) -> Contract:
 
 @transaction.atomic
 def resolve_dispute_to_freelancer(*, milestone: Milestone, user, note: str = "") -> Milestone:
-    """
-    Admin-only resolution path:
-    release the disputed escrow to the freelancer.
-    """
+    """Admin-only resolution path: release the disputed escrow to the freelancer."""
     if not getattr(user, "is_staff", False) and not getattr(user, "is_superuser", False):
         raise PermissionDenied(_("Only staff can resolve disputes."))
 
@@ -1075,23 +472,18 @@ def resolve_dispute_to_freelancer(*, milestone: Milestone, user, note: str = "")
     milestone.save()
 
     sync_contract_completion(milestone.contract)
-
     log_contract_event(
         contract=milestone.contract,
         event_type=ContractEvent.ContractEventType.MILESTONE_DISPUTE_RESOLVED_TO_FREELANCER,
         actor=user,
         metadata={"milestone_public_id": milestone.public_id, "note": note},
     )
-
     return milestone
 
 
 @transaction.atomic
 def resolve_dispute_to_client(*, milestone: Milestone, user, note: str = "") -> Milestone:
-    """
-    Admin-only resolution path:
-    refund the disputed escrow back to the client wallet.
-    """
+    """Admin-only resolution path: refund the disputed escrow back to the client wallet."""
     if not getattr(user, "is_staff", False) and not getattr(user, "is_superuser", False):
         raise PermissionDenied(_("Only staff can resolve disputes."))
 
@@ -1129,93 +521,10 @@ def resolve_dispute_to_client(*, milestone: Milestone, user, note: str = "") -> 
     milestone.save()
 
     sync_contract_completion(milestone.contract)
-
     log_contract_event(
         contract=milestone.contract,
         event_type=ContractEvent.ContractEventType.MILESTONE_DISPUTE_RESOLVED_TO_CLIENT,
         actor=user,
         metadata={"milestone_public_id": milestone.public_id, "note": note},
     )
-
     return milestone
-
-
-
-@transaction.atomic
-def validate_milestone_plan(plan: MilestonePlan):
-    return _validate_plan_rules(plan)
-
-
-@transaction.atomic
-def approve_milestone_plan(plan: MilestonePlan):
-    validate_milestone_plan(plan)
-    plan.status = MilestonePlan.Status.APPROVED
-    plan.save(update_fields=["status", "updated_at"])
-    return plan
-
-
-@transaction.atomic
-def create_contract_from_selected_plan(*, job, plan: MilestonePlan, proposal, created_by=None) -> Contract:
-    if plan.job_id != job.id:
-        raise ValidationError({"detail": _("Milestone plan does not belong to this job.")})
-
-    if plan.status != MilestonePlan.Status.APPROVED:
-        raise ValidationError({"detail": _("Only approved plans can create a contract.")})
-
-    if not plan.is_selected:
-        raise ValidationError({"detail": _("Select a milestone plan before creating the contract.")})
-
-    total = _validate_plan_rules(plan)
-    client = _job_client_profile(job)
-
-    if client is None:
-        raise ValidationError({"detail": _("Job client profile could not be resolved.")})
-
-    if proposal is None:
-        raise ValidationError({"detail": _("An shortlisted proposal is required.")})
-
-    assert_can_create_proposal(freelancer)
-
-    contract = Contract.objects.create(
-        job=job,
-        proposal=proposal,
-        client=client,
-        freelancer=proposal.freelancer,
-        title=getattr(job, "title", "") or _("Contract"),
-        notes="",
-        status=Contract.Status.PENDING_FUNDING,
-        milestone_mode=_plan_mode(plan),
-        split_owner=getattr(job, "split_owner", Contract.SplitOwner.CLIENT),
-        collab_allowed=getattr(job, "collab_allowed", False),
-        budget_total=getattr(job, "budget_total", None) or total,
-        agreed_price=total,
-        source_plan=plan if hasattr(Contract, "source_plan") else None,
-        deadline=getattr(job, "deadline", None) or getattr(proposal.job, "deadline", None),
-    )
-
-    for item in plan.items.order_by("order", "created_at"):
-        milestone = Milestone.objects.create(
-            contract=contract,
-            source_item=item,
-            title=item.title,
-            description=item.description,
-            amount=item.amount,
-            due_date=item.due_date,
-            order=item.order,
-            status=Milestone.Status.PENDING,
-        )
-        item.status = MilestonePlanItem.Status.CONVERTED
-        item.save(update_fields=["status", "updated_at"])
-
-    log_contract_event(
-        contract=contract,
-        event_type=ContractEvent.ContractEventType.CONTRACT_CREATED,
-        actor=created_by,
-        metadata={
-            "job_public_id": job.public_id,
-            "plan_public_id": plan.public_id,
-            "proposal_public_id": getattr(proposal, "public_id", None),
-        },
-    )
-
-    return contract

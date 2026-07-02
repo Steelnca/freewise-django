@@ -22,7 +22,7 @@ class CollabRequest(models.Model):
     PUBLIC_ID_LENGTH_PREFIX = 12
 
     milestone = models.ForeignKey(
-        "contracts.Milestone",
+        "milestones.Milestone",
         on_delete=models.CASCADE,
         related_name="collab_requests",
     )

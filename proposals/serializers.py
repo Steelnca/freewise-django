@@ -5,7 +5,7 @@ from rest_framework import serializers
 
 from django.utils.translation import gettext as _
 
-from contracts.serializers import MilestonePlanSerializer
+from milestones.serializers import MilestonePlanSerializer
 from jobs.models import Job
 
 from .models import Proposal

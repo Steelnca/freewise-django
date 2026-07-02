@@ -8,8 +8,8 @@ from rest_framework.views import APIView
 from django.db import transaction
 from django.utils import timezone
 
-from contracts.models import MilestonePlan
-from contracts.services import create_contract_from_selected_plan
+from milestones.services import create_contract_from_selected_plan
+from milestones.models import MilestonePlan
 from jobs.models import Job
 
 from .models import Proposal
@@ -218,5 +218,3 @@ class WithdrawProposalView(APIView):
 
         return Response({"detail": "Proposal withdrawn."}, status=status.HTTP_200_OK)
 
-
-rejectProposalView = RejectProposalView

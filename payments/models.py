@@ -741,7 +741,7 @@ class PaymentAttempt(models.Model):
     )
 
     milestone = models.ForeignKey(
-        "contracts.Milestone",
+        "milestones.Milestone",
         on_delete=models.CASCADE,
         related_name="payment_attempts",
         verbose_name=_("milestone"),

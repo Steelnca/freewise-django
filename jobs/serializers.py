@@ -4,8 +4,8 @@ from rest_framework import serializers
 from django.db import transaction
 from django.utils.translation import gettext as _
 
-from contracts.models import MilestonePlan, MilestonePlanItem
 from contracts.serializers import ContractSerializer
+from milestones.models import MilestonePlan, MilestonePlanItem
 from proposals.serializers import ProposalSerializer
 from billing.services import assert_can_post_job
 
